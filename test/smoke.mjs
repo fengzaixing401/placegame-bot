@@ -33,6 +33,11 @@ function check(name, cond, detail = "") {
 const calls = [];
 // 可变状态:用例要分别覆盖"免费次数还有"与"免费次数用尽"两种门票场景
 let freeAttempts = 3;
+// 世界首领状态同样要能切:窗口内(active)与窗口外(closed)是两条分支
+let worldStatusRows = [
+  { instanceId: "wb_boss_w_fixed_20", bossKey: "boss_w", status: "active",
+    maxHp: 1000, currentHp: 900, hpPercent: 90, participantCount: 12, maxAttemptCount: 3 }
+];
 function fakeFetch(url, opts = {}) {
   const path = new URL(url).pathname;
   const body = opts.body ? JSON.parse(opts.body) : null;
@@ -120,8 +125,10 @@ function fakeFetch(url, opts = {}) {
       return reply({ assisted: body.bossKey });
     case "/api/boss/claim-reward":
       return reply({ claimed: true });
+    // 真实服务端返回的是实例数组(每项自带 status),不是单个对象。
+    // 早先这里照单对象造假数据,把「窗口外跳过」读不到状态的 bug 一直遮住了。
     case "/api/boss/world-status":
-      return reply({ status: "open", currentHp: 900, maxHp: 1000, remainingAttemptCount: 3 });
+      return reply(worldStatusRows);
     case "/api/quests/claim":
       return reply({ claimed: body.questKey });
     case "/api/achievements/claim":
@@ -329,6 +336,45 @@ check("允许门票时才打", bpTicket.attempted.some((x) => x.bossKey === "bos
 freeAttempts = 3;
 const bpFree = await runBossRules({ challengePersonal: true, personalBosses: ["boss_pig"], useTickets: false });
 check("免费次数够则正常打", bpFree.attempted.some((x) => x.bossKey === "boss_pig"), JSON.stringify(bpFree.skipped));
+
+// 世界首领:world-status 返回实例数组,早先按单对象读 status,这个「窗口外跳过」从来没生效过。
+// 跳过必须是"每项都明确 closed"才成立 —— 读不到状态或状态词没见过时照旧尝试,
+// 免得猜错状态词把整轮白白跳掉。
+const wbOpen = await service.run("fzx401", (api, row) => actions["boss.world"](api, row));
+check(
+  "窗口内不跳过,并记下中文名与胜负",
+  wbOpen.skipped === undefined &&
+    wbOpen.attempted.some((x) => x.bossKey === "boss_w" && x.name === "世界首领" && x.win === true),
+  JSON.stringify({ skipped: wbOpen.skipped, attempted: wbOpen.attempted.map((x) => ({ k: x.bossKey, n: x.name, w: x.win })) })
+);
+
+worldStatusRows = [{ instanceId: "wb_1", bossKey: "boss_w", status: "closed", hpPercent: 0 }];
+const callsBeforeClosed = calls.length;
+const wbClosed = await service.run("fzx401", (api, row) => actions["boss.world"](api, row));
+check(
+  "全部 closed 时跳过且不打接口",
+  wbClosed.skipped === "世界首领未开放" &&
+    !calls.slice(callsBeforeClosed).some((c) => c.path === "/api/boss/challenge" || c.path === "/api/boss/assist"),
+  JSON.stringify({ skipped: wbClosed.skipped, paths: calls.slice(callsBeforeClosed).map((c) => c.path) })
+);
+
+// 没见过的状态值不能当成"未开放":猜错状态词会让整轮静默空转
+worldStatusRows = [{ instanceId: "wb_1", bossKey: "boss_w", status: "cooldown" }];
+const wbUnknown = await service.run("fzx401", (api, row) => actions["boss.world"](api, row));
+check("状态值没见过仍照旧尝试", wbUnknown.skipped === undefined && wbUnknown.attempted.length === 1, JSON.stringify(wbUnknown.skipped));
+
+// 状态里只有一项 closed、另一项还开着,就不能算整体未开放
+worldStatusRows = [
+  { instanceId: "wb_1", bossKey: "boss_w", status: "closed" },
+  { instanceId: "wb_2", bossKey: "boss_w2", status: "active" }
+];
+const wbMixed = await service.run("fzx401", (api, row) => actions["boss.world"](api, row));
+check("只有部分 closed 不算未开放", wbMixed.skipped === undefined && wbMixed.attempted.length === 1, JSON.stringify(wbMixed.skipped));
+
+worldStatusRows = [
+  { instanceId: "wb_boss_w_fixed_20", bossKey: "boss_w", status: "active",
+    maxHp: 1000, currentHp: 900, hpPercent: 90, participantCount: 12, maxAttemptCount: 3 }
+];
 
 const act = await service.run("fzx401", (api, row) => actions.activity(api, row));
 check("任务只领可领的(q1)", act.quests.length === 1 && act.quests[0].questKey === "q1", JSON.stringify(act.quests));

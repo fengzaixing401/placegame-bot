@@ -203,6 +203,69 @@ check("落库裁剪标记被说成裁剪,不当数据渲染", () => {
   assert.doesNotMatch(t, /…另有 5 项$/m);
 });
 
+// 真号 boss.world 的实际落库形状:battle 被裁成标记字符串,且没有 win 字段。
+// 旧渲染把标记当对象读,渲出「 回合 · 耗时 0 秒 · 胜率 %」「我方生命 / · 首领生命 /」,
+// 还因为读不到 win 就默认判「失败」——那是编造战果。
+check("battle 被裁剪时不编造战果、不渲空壳", () => {
+  const worldCut = {
+    status: { status: "open" },
+    assisted: [],
+    attempted: [
+      { bossKey: "golden_goblet_guard", name: "金樽守卫", result: { battle: "[对象,超出深度]" } }
+    ],
+    claimed: { message: "首领奖励在挑战胜利时即时发放。" },
+    errors: []
+  };
+  const t = text(worldCut, "boss.world");
+  assert.match(t, /挑战 金樽守卫:战果未记录/);
+  assert.match(t, /战斗详情内容嵌套过深,未记录/);
+  // 空值骨架:标签后面直接跟分隔符或单位
+  assert.doesNotMatch(t, /挑战 金樽守卫:失败/);
+  assert.doesNotMatch(t, /^\s*回合/m);
+  assert.doesNotMatch(t, /胜率 %/);
+  assert.doesNotMatch(t, /生命 \//);
+  assert.doesNotMatch(t, /耗时 0 秒/);
+  // 摘要不能把"没记录"算成失败
+  assert.doesNotMatch(PGLog.oneLine(worldCut, "boss.world"), /项失败/);
+});
+
+check("battle 字段缺一半时只写读到的那部分", () => {
+  const t = text({
+    attempted: [
+      { bossKey: "x", name: "半残首领", win: false, result: { battle: { win: false, rounds: 12, bossHp: 500 } } }
+    ]
+  }, "boss.world");
+  assert.match(t, /挑战 半残首领:失败/);
+  assert.match(t, /12 回合/);
+  assert.doesNotMatch(t, /胜率/);   // winChance 缺失
+  assert.doesNotMatch(t, /耗时/);   // durationSeconds 缺失
+  assert.match(t, /首领生命上限 500/);
+  assert.doesNotMatch(t, /我方生命/); // 我方两个字段都缺
+});
+
+// worldStatus 实测返回实例数组,旧写法按单对象读 d.status.status,这行从来没渲染过
+check("世界首领状态按数组渲染,并借 attempted 的中文名", () => {
+  const t = text({
+    status: [
+      { bossKey: "golden_goblet_guard", status: "active", hpPercent: 90.02, participantCount: 12 },
+      { bossKey: "no_data_boss" }
+    ],
+    attempted: [{ bossKey: "golden_goblet_guard", name: "金樽守卫", win: true, result: { battle: { win: true, rounds: 3 } } }]
+  }, "boss.world");
+  assert.match(t, /金樽守卫:进行中 · 剩余血量 90\.02% · 12 人参战/);
+  assert.doesNotMatch(t, /golden_goblet_guard/); // 有中文名就不露键
+  assert.doesNotMatch(t, /no_data_boss:/);       // 一个字段都读不到就整行不出
+});
+
+check("世界首领显示中文名而不是 bossKey 裸键", () => {
+  const t = text({
+    assisted: [{ bossKey: "scarlet_duke", name: "赤红公爵", reason: "打不过", result: { message: "已协助" } }],
+    attempted: []
+  }, "boss.world");
+  assert.match(t, /赤红公爵/);
+  assert.doesNotMatch(t, /scarlet_duke/);
+});
+
 check("未知结构也不吐 JSON", () => {
   const t = text({ 未知字段: { 深层: [1, 2, { a: "b" }] }, name: "测试" }, "collect");
   assert.doesNotMatch(t, /[{}[\]]/);

@@ -257,24 +257,35 @@ export async function runWorldBoss(api, { rules = {}, assistOnly = false } = {})
     out.errors.push({ step: "worldStatus", error: err.message });
     return null;
   });
-  if (out.status?.status === "closed") return { ...out, skipped: "世界首领未开放" };
+  // 实测 /api/boss/world-status 返回的是实例数组,不是单个对象 —— 旧写法读 out.status.status
+  // 对数组恒为 undefined,这个「窗口外跳过」从来没生效过。
+  // 只在确实读到状态、且每一项都明确是 closed 时才跳:读取失败(null)照旧尝试,
+  // 出现没见过的状态值也照旧尝试,免得因为猜错状态词把整轮跳掉。
+  const instances = Array.isArray(out.status) ? out.status : out.status ? [out.status] : [];
+  if (instances.length > 0 && instances.every((s) => s?.status === "closed")) {
+    return { ...out, skipped: "世界首领未开放" };
+  }
 
   const bosses = await listBosses(api, { type: BOSS_TYPE.WORLD });
   for (const boss of bosses) {
     const key = pickKey(boss);
+    // 与地图首领记同一套字段:name 供页面显示中文名(否则日志里只剩 bossKey 裸键),
+    // win 供日志判定胜负 —— 战斗详情深埋在 result 里,落库裁剪时经常被砍掉。
+    const label = { bossKey: key, name: boss.name };
     try {
       if (assistOnly) {
-        out.assisted.push({ bossKey: key, result: await assist(api, key) });
+        out.assisted.push({ ...label, result: await assist(api, key) });
       } else {
         const reason = blockedReason(boss);
         if (reason) {
-          out.assisted.push({ bossKey: key, fallback: "assist", reason, result: await assist(api, key) });
+          out.assisted.push({ ...label, fallback: "assist", reason, result: await assist(api, key) });
         } else {
-          out.attempted.push({ bossKey: key, result: await challenge(api, key, rules) });
+          const result = await challenge(api, key, rules);
+          out.attempted.push({ ...label, win: result?.battle?.win, result });
         }
       }
     } catch (err) {
-      out.errors.push({ bossKey: key, error: err.message });
+      out.errors.push({ ...label, error: err.message });
     }
   }
 

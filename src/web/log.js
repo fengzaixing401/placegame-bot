@@ -26,6 +26,11 @@
     return n.toLocaleString("zh-CN");
   };
 
+  // 字段是否真有数值。渲染前一律先问这个:读不到就少写一行,不拿 undefined 拼句子。
+  var isNum = function (v) {
+    return typeof v === "number" && Number.isFinite(v);
+  };
+
   var dur = function (sec) {
     var s = Math.round(Number(sec) || 0);
     if (s <= 0) return "0 秒";
@@ -408,6 +413,14 @@
     errLines(d.errors, out);
   };
 
+  // 「剩余/上限」这种成对数值。两个都没有就整段不写,只有上限就只写上限,
+  // 绝不输出「我方生命 /」这种只剩斜杠的壳子。
+  var hpPart = function (parts, label, remaining, max) {
+    if (isNum(remaining) && isNum(max)) parts.push(label + " " + N(remaining) + "/" + N(max));
+    else if (isNum(max)) parts.push(label + "上限 " + N(max));
+    else if (isNum(remaining)) parts.push(label + " " + N(remaining));
+  };
+
   // 单场战斗。奖励优先用 rewards.summary —— 那是游戏自己写好的中文串,
   // 且是本次调用的产物;notices 是收件箱,会混进别的动作的结果,不能用。
   var bossAttempt = function (a, out) {
@@ -418,9 +431,21 @@
       out.push(L("预览 " + name + ":" + verdict + (f.chance != null ? " · 胜率 " + N(f.chance) + "%" : ""), "muted"));
       return;
     }
-    var b = (a && a.result && a.result.battle) || null;
-    var won = (a && a.win === true) || (b && b.win === true);
-    out.push(L("挑战 " + name + ":" + (won ? "胜利" : "失败"), won ? "ok" : "bad"));
+    // battle 可能是落库裁剪留下的标记字符串而不是对象。当对象读会让每个字段都是
+    // undefined,渲出「 回合 · 胜率 %」这种空骨架 —— 必须先认出标记。
+    var raw = a && a.result && a.result.battle;
+    var battleCut = cutNote(raw);
+    var b = !battleCut && raw && typeof raw === "object" ? raw : null;
+
+    // 胜负是三态:真赢 / 真输 / 没记录。缺字段时不能默认判输 ——
+    // 世界首领的战斗详情常被裁掉,凭空写「失败」就是编造战果。
+    var won = (a && a.win === true) || (b && b.win === true) ? true
+      : (a && a.win === false) || (b && b.win === false) ? false
+      : null;
+    out.push(won === null
+      ? L("挑战 " + name + ":战果未记录", "muted")
+      : L("挑战 " + name + ":" + (won ? "胜利" : "失败"), won ? "ok" : "bad"));
+    if (battleCut) out.push(L("战斗详情" + battleCut, "muted", 1));
 
     var rw = (a && a.result && a.result.rewards) || null;
     var sum = take(rw && rw.summary).rows.filter(function (x) { return typeof x === "string" && x; });
@@ -432,10 +457,19 @@
     });
 
     if (b) {
-      out.push(L(N(b.rounds) + " 回合 · 耗时 " + dur(b.durationSeconds) + " · 胜率 " + N(b.winChance) + "%", "muted", 1));
-      out.push(L("我方生命 " + N(b.playerHpRemaining) + "/" + N(b.playerHp) +
-        " · 首领生命 " + N(b.bossHpRemaining) + "/" + N(b.bossHp), "muted", 1));
-      if (!won && b.powerBottleneck) out.push(L("短板:" + b.powerBottleneck, "warn", 1));
+      // 逐段按字段有无拼,整段都没有就不出这一行 —— 不留「 回合 · 胜率 %」这种空壳
+      var stat = [];
+      if (isNum(b.rounds)) stat.push(N(b.rounds) + " 回合");
+      if (isNum(b.durationSeconds)) stat.push("耗时 " + dur(b.durationSeconds));
+      if (isNum(b.winChance)) stat.push("胜率 " + N(b.winChance) + "%");
+      if (stat.length) out.push(L(stat.join(" · "), "muted", 1));
+
+      var hp = [];
+      hpPart(hp, "我方生命", b.playerHpRemaining, b.playerHp);
+      hpPart(hp, "首领生命", b.bossHpRemaining, b.bossHp);
+      if (hp.length) out.push(L(hp.join(" · "), "muted", 1));
+
+      if (won === false && b.powerBottleneck) out.push(L("短板:" + b.powerBottleneck, "warn", 1));
     }
 
     var c = (a && a.result && a.result.cost) || null;
@@ -468,10 +502,25 @@
     if (asst.rows.length) {
       out.push(L("协助世界首领 " + asst.rows.length + " 次", "ok"));
       asst.rows.forEach(function (a) {
-        out.push(L((a.bossKey || "未知首领") + (a.reason ? " —— 打不过,改为协助(" + a.reason + ")" : "") + resultNote(a.result), "", 1));
+        out.push(L((a.name || a.bossKey || "未知首领") + (a.reason ? " —— 打不过,改为协助(" + a.reason + ")" : "") + resultNote(a.result), "", 1));
       });
     }
-    if (d.status && d.status.status) out.push(L("世界首领状态:" + d.status.status, "muted"));
+    // 实测 worldStatus 返回的是实例数组(每项 bossKey/status/hpPercent/participantCount),
+    // 不是单个对象。旧写法读 d.status.status 对数组恒为 undefined,这行从来没渲染过。
+    // 状态项里没有中文名,借 attempted/assisted 已有的 name 补上,补不到才退回 bossKey。
+    var names = {};
+    asArr(d.attempted).concat(asArr(d.assisted)).forEach(function (a) {
+      if (a && a.bossKey && a.name) names[a.bossKey] = a.name;
+    });
+    var WB_STATE = { active: "进行中", closed: "已结束", pending: "未开放" };
+    take(d.status).rows.forEach(function (s) {
+      if (!s || typeof s !== "object") return;
+      var bits = [];
+      if (s.status) bits.push(WB_STATE[s.status] || s.status);
+      if (isNum(s.hpPercent)) bits.push("剩余血量 " + N(s.hpPercent) + "%");
+      if (isNum(s.participantCount)) bits.push(N(s.participantCount) + " 人参战");
+      if (bits.length) out.push(L((names[s.bossKey] || s.bossKey || "世界首领") + ":" + bits.join(" · "), "muted"));
+    });
 
     if (typeof d.skipped === "string") {
       out.push(L(d.skipped, "muted"));
