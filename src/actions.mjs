@@ -49,10 +49,12 @@ export function buildActions(config) {
       });
     },
 
+    // types 不在这里兜底:交给 runBosses 按 challengePersonal 决定,
+    // 免得这里写死 PERSONAL 把"个人首领默认不打"的设置绕过去
     "boss.map": async (api, row, args = {}) => {
       const r = rules(row).boss;
       return boss.runBosses(api, {
-        types: args?.types ?? [boss.BOSS_TYPE.MAP, boss.BOSS_TYPE.PERSONAL],
+        types: args?.types,
         rules: r,
         maxChallenges: args?.maxChallenges ?? r.maxChallengesPerRun,
         dryRun: args?.dryRun === true
@@ -75,6 +77,33 @@ export function buildActions(config) {
         codex: args?.codex ?? r.codex ?? false,
         dailyPoints: args?.dailyPoints ?? r.dailyPoints ?? []
       });
+    },
+
+    // 只读:给 WebUI 表单喂真实可选项,避免让用户手写 key。
+    // 单项失败不影响其余,表单能渲染多少算多少。
+    async options(api) {
+      const [snapshot, bag] = await Promise.all([
+        boss.bossSnapshot(api).catch((err) => ({ error: err.message, bosses: [] })),
+        guild.donatableItems(api).catch((err) => ({ error: err.message }))
+      ]);
+      const bosses = snapshot.bosses ?? [];
+      return {
+        bosses: bosses.map((b) => ({
+          bossKey: b.key ?? b.bossKey ?? null,
+          name: b.name ?? null,
+          type: b.type ?? null,
+          available: b.available !== false,
+          blockedReason: boss.blockedReason(b),
+          remainingAttemptCount: b.remainingAttemptCount ?? null
+        })),
+        // 查不到就只有 "normal" 可信 —— 不猜难度枚举
+        difficulties: boss.difficultyOptions(bosses),
+        personalAttempts: snapshot.personalAttempts ?? null,
+        freeAttemptsLeft: boss.freeAttemptsLeft(snapshot.personalAttempts),
+        donatableItems: Array.isArray(bag) ? bag : [],
+        professions: profession.PROFESSIONS,
+        errors: [snapshot.error, bag?.error].filter(Boolean)
+      };
     },
 
     // 只读状态汇总,供 agent 查看账号当前情况

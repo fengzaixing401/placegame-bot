@@ -33,3 +33,26 @@ export function asArray(value) {
   if (Array.isArray(value)) return value;
   return [];
 }
+
+// 落库前压缩执行结果。必须裁剪"对象"而不是裁剪序列化后的字符串——后者会切在
+// token 中间,产出无法 JSON.parse 的坏数据(排程曾用 slice(0,4000) 踩过)。
+export function compactForStore(value, { maxString = 400, maxArray = 20, maxDepth = 8 } = {}) {
+  const walk = (node, depth) => {
+    if (node === null || typeof node !== "object") {
+      if (typeof node === "string" && node.length > maxString) {
+        return `${node.slice(0, maxString)}…(共 ${node.length} 字)`;
+      }
+      return node;
+    }
+    if (depth >= maxDepth) return Array.isArray(node) ? `[数组 ${node.length} 项,超出深度]` : "[对象,超出深度]";
+    if (Array.isArray(node)) {
+      const kept = node.slice(0, maxArray).map((v) => walk(v, depth + 1));
+      if (node.length > maxArray) kept.push(`…另有 ${node.length - maxArray} 项`);
+      return kept;
+    }
+    const out = {};
+    for (const [k, v] of Object.entries(node)) out[k] = walk(v, depth + 1);
+    return out;
+  };
+  return walk(value, 0);
+}

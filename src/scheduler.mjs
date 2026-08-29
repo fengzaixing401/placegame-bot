@@ -1,5 +1,6 @@
 import { nowIso } from "./db.mjs";
 import { rulesFor } from "./config.mjs";
+import { compactForStore } from "./util.mjs";
 
 const TICK_MS = 60 * 1000;
 
@@ -162,7 +163,7 @@ export class Scheduler {
       const result = await this.service.run(account.id, (client) => action(client, account));
       this.db
         .prepare(`UPDATE job_runs SET status='ok', finished_at=?, result_json=? WHERE id=?`)
-        .run(nowIso(), JSON.stringify(result ?? null).slice(0, 4000), runId);
+        .run(nowIso(), this.#storableResult(result), runId);
       this.logger.log(`[scheduler] ${account.label}/${job.key} 完成`);
       return { status: "ok", result };
     } catch (err) {
@@ -171,6 +172,20 @@ export class Scheduler {
         .run(nowIso(), String(err.message).slice(0, 500), runId);
       throw err;
     }
+  }
+
+  // 结果行既要有界又必须是合法 JSON。先按常规档裁剪,仍超限就再狠裁一次;
+  // 最坏情况只存一句说明,也绝不存半截 JSON。
+  #storableResult(result) {
+    const attempts = [
+      { maxString: 400, maxArray: 20, maxDepth: 8 },
+      { maxString: 120, maxArray: 5, maxDepth: 4 }
+    ];
+    for (const opts of attempts) {
+      const text = JSON.stringify(compactForStore(result ?? null, opts));
+      if (text !== undefined && text.length <= 60000) return text;
+    }
+    return JSON.stringify({ note: "结果过大,已省略。请用对应 REST 端点重新取回。" });
   }
 
   recentRuns({ accountId, limit = 50 } = {}) {

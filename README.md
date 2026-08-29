@@ -134,7 +134,18 @@ agent 用 `authorization: Bearer <令牌>`，浏览器用 WebUI 登录后的会�
 
 同一时间片重复触发靠 `job_runs` 的 UNIQUE 约束挡掉，重启或手动 tick 都不会重复执行。
 
-每个账号可用 `PUT /accounts/:id/rules` 覆盖，结构与默认规则同形，数组整体替换。
+每个账号可用 `PUT /accounts/:id/rules` 覆盖，结构与默认规则同形，数组整体替换。WebUI 的「规则设置」是同一份数据的表单视图，不必手写 JSON。
+
+## 首领挑战的几个约定
+
+- **个人首领默认完全不碰。** 要打得先开 `boss.challengePersonal`，再把首领填进 `boss.personalBosses` —— 名单为空就一个都不打。`boss.mapBosses` 相反，空数组表示「全部可挑战的都打」。
+- **挑战前先调预览。** `requirePredictedWin` 为真时预测会输就跳过；`minWinChance` 是胜率下限，预览拿不到胜率按不达标处理。设 `0` 才是不看胜率。
+- **门票只能间接控制。** 接口没有门票开关，免费次数用尽后服务端会自动扣票。`useTickets` 为假时本程序在免费次数用尽后就停手，以此避免扣票。
+- **难度取值不猜。** WebUI 会读游戏返回的可选难度渲染下拉；读不到就退化成文本框，此时只有 `normal` 是确认可用的。
+
+## 公会捐献
+
+规则里填的是物品的稳定标识 `itemKey`，运行时再去背包里解析成当次的实例 `itemId` —— 实例 ID 每次都变，写死会捐错东西。
 
 ## 安全
 

@@ -1,8 +1,38 @@
 import { unwrap } from "../util.mjs";
+import { listInventory } from "./inventory.mjs";
 
 export async function view(api) {
   const data = unwrap(await api.request("/api/guild/view"));
   return data?.guild ?? data;
+}
+
+// 背包物品行的稳定键与实例 ID。捐献接口收的是实例 ID(官方 CLI 标 reference:true,
+// 引用失效会报"列表已失效,请重新查询"),所以规则里存 itemKey,运行时在这里换。
+function rowItemKey(row) {
+  for (const k of ["itemKey", "key", "templateKey", "itemTemplateKey"]) {
+    if (row?.[k]) return String(row[k]);
+  }
+  return null;
+}
+
+function rowItemId(row) {
+  for (const k of ["itemId", "id", "instanceId"]) {
+    if (row?.[k]) return row[k];
+  }
+  return null;
+}
+
+// 可捐献物品清单,同时供 WebUI 下拉渲染。amount 是当前持有数量。
+export async function donatableItems(api) {
+  const { items } = await listInventory(api);
+  return items
+    .map((row) => ({
+      itemKey: rowItemKey(row),
+      itemId: rowItemId(row),
+      name: row?.name ?? row?.itemName ?? null,
+      amount: row?.amount ?? row?.count ?? row?.quantity ?? null
+    }))
+    .filter((r) => r.itemKey && r.itemId);
 }
 
 // ④ 公会兑换 + 捐献 + 分红。
@@ -24,17 +54,39 @@ export async function dailyRoutine(api, { redeem = [], donate = [], equipmentDon
     }
   }
 
+  // 捐献:规则给的是 itemKey,这里查一次背包换成实例 itemId。背包只在真的要捐时才查。
+  let bag = null;
   for (const entry of donate) {
-    const itemId = typeof entry === "string" ? entry : entry?.itemId;
+    const itemKey = typeof entry === "string" ? entry : entry?.itemKey;
     const amount = typeof entry === "string" ? 1 : entry?.amount ?? 1;
-    if (!itemId) {
-      out.errors.push({ step: "donate", error: "缺少 itemId(捐献按 itemId,与兑换的 itemKey 不同)", entry });
+    let itemId = typeof entry === "string" ? null : entry?.itemId ?? null;
+
+    if (!itemId && !itemKey) {
+      out.errors.push({ step: "donate", error: "缺少 itemKey", entry });
       continue;
     }
+
+    if (!itemId) {
+      if (bag === null) {
+        try {
+          bag = await donatableItems(api);
+        } catch (err) {
+          out.errors.push({ step: "donate", error: `读取背包失败,无法解析 itemId:${err.message}` });
+          break;
+        }
+      }
+      const hit = bag.find((r) => r.itemKey === itemKey);
+      if (!hit) {
+        out.errors.push({ step: "donate", itemKey, error: "背包里没有这个物品,已跳过" });
+        continue;
+      }
+      itemId = hit.itemId;
+    }
+
     try {
-      out.donated.push({ itemId, amount, result: await donateItem(api, itemId, amount) });
+      out.donated.push({ itemKey, itemId, amount, result: await donateItem(api, itemId, amount) });
     } catch (err) {
-      out.errors.push({ step: "donate", itemId, error: err.message });
+      out.errors.push({ step: "donate", itemKey, itemId, error: err.message });
     }
   }
 

@@ -36,14 +36,25 @@ const DEFAULTS = {
     guild: {
       enabled: true,
       redeem: [], // [{itemKey, amount}]
-      donate: [], // [{itemKey|itemId, amount}]
+      // [{itemKey, amount}] —— 捐献接口收的是背包实例 itemId(会变),
+      // 所以规则里存稳定的 itemKey,运行时再查背包换成 itemId
+      donate: [],
       claimDividend: true,
       intervalHours: 20
     },
     boss: {
       enabled: true,
       difficulty: "normal",
-      mapBosses: [], // 留空 = 自动从列表挑可挑战的
+      // 地图首领:留空 = 打列表里所有可挑战的
+      mapBosses: [],
+      // 个人首领必须显式开启并列出目标。默认关,否则会把野猪王之类的次数打光
+      challengePersonal: false,
+      personalBosses: [],
+      // 门票只能客户端侧卡:接口没有门票参数,免费次数用尽后服务端会自动扣票
+      useTickets: false,
+      // 胜率闸门:真实挑战前先 preview,不达标就跳过
+      minWinChance: 80,
+      requirePredictedWin: true,
       selectedSkillKeys: [],
       buffKey: "",
       affixKey: "",

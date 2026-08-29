@@ -173,6 +173,76 @@ button.warn-btn { background: var(--danger); }
 .rules summary { cursor: pointer; color: var(--muted); font-size: 13px; }
 .rules > div { margin-top: 10px; display: flex; flex-direction: column; gap: 8px; }
 
+/* ---- 规则表单 ---- */
+
+.rule-form { display: flex; flex-direction: column; gap: 14px; }
+
+.rule-section {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px 14px 14px;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+
+.rule-section legend { color: var(--fg); font-size: 13px; font-weight: 600; padding: 0 6px; }
+
+/* 勾选项要横排,文字跟在框后面;其余字段仍是竖排的 label */
+.field.check {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  color: var(--fg);
+  cursor: pointer;
+}
+
+.field.check > span:first-of-type { flex: 0 0 auto; }
+.field.check .hint { flex: 1 1 100%; }
+
+input[type="checkbox"] { width: auto; accent-color: var(--accent); margin: 0; }
+
+.subfield { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.sub-title { font-size: 13px; color: var(--muted); }
+
+.checklist {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 220px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 6px 8px;
+}
+
+.check-row {
+  flex-direction: row;
+  align-items: baseline;
+  gap: 8px;
+  color: var(--fg);
+  cursor: pointer;
+  padding: 3px 0;
+  flex-wrap: wrap;
+}
+
+.check-name { flex: 0 0 auto; }
+
+.rows { display: flex; flex-direction: column; gap: 6px; }
+.row-line { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.row-line > .row { flex: 1 1 240px; min-width: 0; }
+.row.inline { gap: 6px; }
+.row.inline select, .row.inline input[type="text"] { flex: 1 1 140px; width: auto; min-width: 0; }
+.row.inline input[type="time"] { width: auto; flex: 0 0 auto; }
+input.narrow { width: 5.5em; flex: 0 0 auto; }
+
+.advanced { margin-top: 4px; }
+.advanced summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+.rule-host { display: flex; flex-direction: column; gap: 14px; }
+
 table { width: 100%; border-collapse: collapse; font-size: 13px; }
 th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--line); }
 th { color: var(--muted); font-weight: 500; }

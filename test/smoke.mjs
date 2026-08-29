@@ -31,6 +31,8 @@ function check(name, cond, detail = "") {
 
 // ---- 假游戏服务器 ----
 const calls = [];
+// 可变状态:用例要分别覆盖"免费次数还有"与"免费次数用尽"两种门票场景
+let freeAttempts = 3;
 function fakeFetch(url, opts = {}) {
   const path = new URL(url).pathname;
   const body = opts.body ? JSON.parse(opts.body) : null;
@@ -66,8 +68,13 @@ function fakeFetch(url, opts = {}) {
           { key: "boss_map_3", type: "map", name: "被封锁", available: false, blockedReason: "等级不足" },
           // 真实服务端用空字符串表示"无阻挡原因",仍必须被 available:false 挡住
           { key: "boss_map_4", type: "map", name: "封锁但无原因", available: false, blockedReason: "" },
+          // 可挑战但预览胜率不足,用来验证胜率闸门确实会拦
+          { key: "boss_low", type: "map", name: "胜率不足", available: true, remainingAttemptCount: 1 },
+          // 个人首领:默认必须完全不碰(野猪王回归用例)
+          { key: "boss_pig", type: "personal", name: "野猪王", available: true, remainingAttemptCount: 3 },
           { key: "boss_w", type: "world", name: "世界首领", available: true }
         ],
+        personalBossAttempts: { freeRemaining: freeAttempts, ticketRemaining: 5 },
         quests: [
           { questKey: "q1", canClaim: true },
           { questKey: "q2", claimed: true },
@@ -102,6 +109,11 @@ function fakeFetch(url, opts = {}) {
       return reply({ donated: body.itemId, amount: body.amount });
     case "/api/guild/claim-dividend":
       return reply({ dividend: 500 });
+    case "/api/boss/preview":
+      // boss_low 故意给低胜率,验证闸门会拦下
+      return body?.bossKey === "boss_low"
+        ? reply({ predictedWin: false, chance: 30 })
+        : reply({ predictedWin: true, chance: 95 });
     case "/api/boss/challenge":
       return reply({ battle: { win: true }, rewards: { summary: ["金币"] } });
     case "/api/boss/assist":
@@ -134,6 +146,7 @@ const { createHttpServer } = await import("../src/http-server.mjs");
 const { SettingsStore } = await import("../src/settings.mjs");
 const { buildActions } = await import("../src/actions.mjs");
 const { unwrap } = await import("../src/util.mjs");
+const bossFeature = await import("../src/features/boss.mjs");
 
 console.log("\n[1] 配置与密钥校验");
 const config = await loadConfig();
@@ -204,9 +217,50 @@ check("公会 donate 用 itemId", g.donated[0]?.result?.donated === "i1");
 check("公会分红", g.dividend?.dividend === 500);
 
 const bm = await service.run("fzx401", (api, row) => actions["boss.map"](api, row));
-check("首领跳过次数用尽与被封锁", bm.attempted.length === 1 && bm.skipped.length === 3, JSON.stringify(bm.skipped.map((s) => s.reason)));
+check("首领跳过次数用尽与被封锁", bm.attempted.length === 1 && bm.attempted[0].bossKey === "boss_map_1", JSON.stringify({ a: bm.attempted.map((x) => x.bossKey), s: bm.skipped.map((s) => s.reason) }));
 check("blockedReason 为空串也算阻挡", bm.skipped.some((s) => s.bossKey === "boss_map_4" && !!s.reason), JSON.stringify(bm.skipped));
+check("胜率不足被闸门拦下", bm.skipped.some((s) => s.bossKey === "boss_low" && /胜率|预测会输/.test(s.reason)), JSON.stringify(bm.skipped.filter((s) => s.bossKey === "boss_low")));
+check("挑战前先调 preview", calls.some((x) => x.path === "/api/boss/preview" && x.body?.bossKey === "boss_map_1"));
+check("难度写进输出", bm.difficulty === "normal", String(bm.difficulty));
+// 野猪王回归:默认配置下个人首领连候选都不该进,skipped 里也不该出现
+check(
+  "个人首领默认完全不碰",
+  !bm.attempted.some((x) => x.bossKey === "boss_pig") && !bm.skipped.some((s) => s.bossKey === "boss_pig"),
+  JSON.stringify({ a: bm.attempted.map((x) => x.bossKey), s: bm.skipped.map((x) => x.bossKey) })
+);
 check("首领挑战后领奖", bm.claimed?.claimed === true);
+
+// 直接驱动 runBosses 覆盖个人首领的三档控制。基线取默认闸门值,只改要测的开关。
+const runBossRules = (over) =>
+  service.run("fzx401", (api) =>
+    bossFeature.runBosses(api, {
+      rules: { difficulty: "normal", minWinChance: 80, requirePredictedWin: true, ...over }
+    })
+  );
+
+const bpOpen = await runBossRules({ challengePersonal: true, personalBosses: [] });
+check(
+  "开了个人首领但未点名仍不打",
+  !bpOpen.attempted.some((x) => x.bossKey === "boss_pig") &&
+    bpOpen.skipped.some((s) => s.bossKey === "boss_pig" && /未在 personalBosses/.test(s.reason)),
+  JSON.stringify(bpOpen.skipped)
+);
+
+freeAttempts = 0;
+const bpNoFree = await runBossRules({ challengePersonal: true, personalBosses: ["boss_pig"], useTickets: false });
+check(
+  "免费次数用尽且禁用门票则不打",
+  !bpNoFree.attempted.some((x) => x.bossKey === "boss_pig") &&
+    bpNoFree.skipped.some((s) => s.bossKey === "boss_pig" && /免费次数已用尽/.test(s.reason)),
+  JSON.stringify({ free: bpNoFree.freeAttemptsLeft, s: bpNoFree.skipped })
+);
+
+const bpTicket = await runBossRules({ challengePersonal: true, personalBosses: ["boss_pig"], useTickets: true });
+check("允许门票时才打", bpTicket.attempted.some((x) => x.bossKey === "boss_pig"), JSON.stringify(bpTicket.skipped));
+
+freeAttempts = 3;
+const bpFree = await runBossRules({ challengePersonal: true, personalBosses: ["boss_pig"], useTickets: false });
+check("免费次数够则正常打", bpFree.attempted.some((x) => x.bossKey === "boss_pig"), JSON.stringify(bpFree.skipped));
 
 const act = await service.run("fzx401", (api, row) => actions.activity(api, row));
 check("任务只领可领的(q1)", act.quests.length === 1 && act.quests[0].questKey === "q1", JSON.stringify(act.quests));
@@ -214,7 +268,7 @@ check("成就 completed 可领", act.achievements.length === 1);
 check("签到与邮件", act.signIn?.signedIn === true && act.mail?.claimedCount === 3);
 
 const st = await service.run("fzx401", (api, row) => actions.status(api, row));
-check("状态汇总", st.idle?.validSeconds === 39600 && st.bosses === 5, JSON.stringify({ bosses: st.bosses }));
+check("状态汇总", st.idle?.validSeconds === 39600 && st.bosses === 7, JSON.stringify({ bosses: st.bosses }));
 
 console.log("\n[4] 必带请求头");
 const c = calls.find((x) => x.path === "/api/battle/idle-collect");

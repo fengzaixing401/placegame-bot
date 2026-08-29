@@ -205,6 +205,16 @@ export function createHttpServer({ config, service, store, settings, scheduler, 
     return service.run(decodeURIComponent(m[1]), (client, row) => handler(client, row));
   });
 
+  // 表单可选项:首领列表、难度、可捐献物品。要登录游戏取真实数据,故按账号维度。
+  route("GET", /^\/accounts\/([^/]+)\/options$/, async (m) => {
+    const handler = actions.options;
+    if (!handler) throw Object.assign(new Error("动作未实现:options"), { status: 501 });
+    return service.run(decodeURIComponent(m[1]), (client, row) => handler(client, row));
+  });
+
+  // 全局默认策略。WebUI 用它渲染"未覆盖时的实际取值",不必让用户猜默认值。
+  route("GET", /^\/config\/default-rules$/, async () => config.defaultRules);
+
   // 排程
   route("GET", /^\/tasks$/, async () => ({
     scheduler: scheduler?.status() ?? { enabled: false },
