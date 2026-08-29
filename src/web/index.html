@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<link rel="icon" href="data:,">
+<title>placegame-bot 管理</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<div id="gate" class="gate" hidden>
+  <form id="gate-form" class="card">
+    <h1 id="gate-title">登录</h1>
+    <p id="gate-hint" class="hint"></p>
+    <label id="gate-token-row" hidden>
+      API 令牌
+      <input type="password" id="gate-token" autocomplete="off" spellcheck="false">
+    </label>
+    <label>
+      <span id="gate-pw-label">密码</span>
+      <input type="password" id="gate-password" autocomplete="current-password" required>
+    </label>
+    <label id="gate-confirm-row" hidden>
+      确认密码
+      <input type="password" id="gate-confirm" autocomplete="new-password">
+    </label>
+    <button type="submit" id="gate-submit">进入</button>
+    <p id="gate-error" class="error" role="alert" aria-live="polite"></p>
+  </form>
+</div>
+
+<div id="app" hidden>
+  <header>
+    <h1>placegame-bot</h1>
+    <div class="header-right">
+      <span id="ready-badge" class="badge"></span>
+      <button id="logout" class="ghost">登出</button>
+    </div>
+  </header>
+
+  <nav role="tablist">
+    <button role="tab" class="tab active" data-panel="accounts">账号</button>
+    <button role="tab" class="tab" data-panel="tasks">任务记录</button>
+    <button role="tab" class="tab" data-panel="settings">设置</button>
+  </nav>
+
+  <main>
+    <section id="panel-accounts" class="panel">
+      <div class="panel-head">
+        <h2>账号</h2>
+        <button id="add-account">新增账号</button>
+      </div>
+      <form id="new-account" class="card inline-form" hidden>
+        <label>标签<input id="na-label" required placeholder="主号"></label>
+        <label>游戏账号<input id="na-username" required autocomplete="off"></label>
+        <label>游戏密码<input id="na-password" type="password" required autocomplete="new-password"></label>
+        <div class="row">
+          <button type="submit">保存</button>
+          <button type="button" id="na-cancel" class="ghost">取消</button>
+        </div>
+        <p class="hint">凭据加密存库,不写进任何配置文件。</p>
+      </form>
+      <div id="accounts-list" class="list"></div>
+    </section>
+
+    <section id="panel-tasks" class="panel" hidden>
+      <div class="panel-head">
+        <h2>任务记录</h2>
+        <div class="row">
+          <button id="tick" class="ghost">手动触发一轮</button>
+          <button id="refresh-tasks" class="ghost">刷新</button>
+        </div>
+      </div>
+      <p id="sched-status" class="hint"></p>
+      <div id="tasks-list" class="list"></div>
+    </section>
+
+    <section id="panel-settings" class="panel" hidden>
+      <h2>设置</h2>
+
+      <form id="form-webpw" class="card">
+        <h3>WebUI 登录密码</h3>
+        <label>当前密码<input type="password" id="wp-current" required autocomplete="current-password"></label>
+        <label>新密码<input type="password" id="wp-new" required autocomplete="new-password" minlength="12"></label>
+        <label>确认新密码<input type="password" id="wp-confirm" required autocomplete="new-password"></label>
+        <button type="submit">修改密码</button>
+        <p class="hint">至少 12 位。修改后其他设备的登录状态会被作废。</p>
+      </form>
+
+      <form id="form-gamepw" class="card">
+        <h3>游戏账号密码</h3>
+        <label>账号<select id="gp-account"></select></label>
+        <label>新的游戏密码<input type="password" id="gp-password" required autocomplete="off"></label>
+        <button type="submit">更新凭据</button>
+        <p class="hint">改完旧会话立即作废,下次动作会用新密码重新登录游戏。</p>
+      </form>
+
+      <form id="form-token" class="card danger">
+        <h3>轮换 API 令牌</h3>
+        <p class="hint">
+          agent 用这个令牌调接口。轮换后旧令牌<strong>立即失效</strong>,
+          必须同步更新 agent 配置。<code>.env</code> 里的旧值也不再生效,若已泄露请手动删除。
+        </p>
+        <label>WebUI 密码确认<input type="password" id="tk-current" required autocomplete="current-password"></label>
+        <label>新令牌(留空则自动生成 32 字节随机值)<input id="tk-value" autocomplete="off" spellcheck="false" placeholder="留空自动生成"></label>
+        <button type="submit">轮换令牌</button>
+        <div id="tk-result" hidden>
+          <p class="warn">新令牌只显示这一次,离开页面后无法再读出:</p>
+          <code id="tk-out" class="token-out"></code>
+        </div>
+      </form>
+    </section>
+  </main>
+  <p id="toast" class="toast" hidden role="status" aria-live="polite"></p>
+</div>
+<script src="/app.js"></script>
+</body>
+</html>

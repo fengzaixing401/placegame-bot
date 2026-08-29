@@ -98,9 +98,13 @@ export async function loadConfig(overrides = {}) {
   cfg.schedulerEnabled = envBool("PLACEGAME_SCHEDULER", cfg.schedulerEnabled);
   cfg.dbPath = envStr("PLACEGAME_DB_PATH", "") || join(cfg.dataDir, "accounts.db");
 
-  // 密钥只从 env 读,绝不落配置文件
+  // 主密钥只从 env 读,绝不落配置文件也绝不可改
   cfg.masterKeyB64 = envStr("PLACEGAME_MASTER_KEY_B64", "");
+  // API 令牌是引导值:库里存了轮换后的值就以库为准(见 settings.mjs)
   cfg.apiToken = envStr("PLACEGAME_API_TOKEN", "");
+  // 会话 cookie 的 Secure 属性。默认开(生产走 HTTPS 反代);本机 HTTP 调试需置 false 才能登录
+  cfg.webSecureCookie = envBool("PLACEGAME_WEB_SECURE_COOKIE", true);
+  cfg.webSessionHours = envNum("PLACEGAME_WEB_SESSION_HOURS", 12);
 
   if (cfg.rulesFile) {
     const rules = JSON.parse(await readFile(cfg.rulesFile, "utf8"));
@@ -113,9 +117,8 @@ export async function loadConfig(overrides = {}) {
       "缺少 PLACEGAME_MASTER_KEY_B64(32 字节 base64url 主密钥)。生成:node -e \"console.log(require('node:crypto').randomBytes(32).toString('base64url'))\""
     );
   }
-  if (!cfg.apiToken) {
-    throw new Error("缺少 PLACEGAME_API_TOKEN(REST 接口的 Bearer 令牌,供 agent 调用)");
-  }
+  // apiToken 不在此校验:库里可能存着轮换后的令牌,此时 env 允许为空。
+  // 两处都没有才是致命的,那个检查在 index.mjs 开库之后做。
   return cfg;
 }
 

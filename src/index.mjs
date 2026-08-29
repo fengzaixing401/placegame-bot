@@ -1,6 +1,7 @@
 import { loadConfig } from "./config.mjs";
 import { openDb } from "./db.mjs";
 import { SecretBox } from "./crypto.mjs";
+import { SettingsStore } from "./settings.mjs";
 import { AccountStore } from "./accounts/store.mjs";
 import { AccountService } from "./accounts/service.mjs";
 import { fetchClientVersion } from "./version.mjs";
@@ -13,6 +14,21 @@ async function main() {
   const db = openDb(config.dbPath);
   const box = new SecretBox(config.masterKeyB64);
   const store = new AccountStore(db, box);
+
+  // 生效令牌:库里轮换过就以库为准,否则用 env。两处都空则无人能进来,直接拒启。
+  const settings = new SettingsStore(db, box, {
+    envApiToken: config.apiToken,
+    sessionHours: config.webSessionHours
+  });
+  if (!settings.apiToken) {
+    throw new Error(
+      "缺少 API 令牌:环境变量 PLACEGAME_API_TOKEN 为空且数据库中也没有。生成:node -e \"console.log(require('node:crypto').randomBytes(32).toString('base64url'))\""
+    );
+  }
+  console.log(`[init] API 令牌来源:${settings.apiTokenSource}`);
+  if (!settings.webPasswordSet) {
+    console.log("[init] WebUI 密码未设置,首次访问网页需用 Bearer 令牌完成初始设置");
+  }
 
   // 版本闸门:客户端版本从服务端动态取,过低会被 426 拒绝。取不到就用兜底值继续起服务,
   // 让运维仍能通过 REST 管理账号,而不是整个服务起不来。
@@ -42,9 +58,9 @@ async function main() {
     console.log("[init] 排程已关闭(PLACEGAME_SCHEDULER=false),仅提供 REST");
   }
 
-  const server = createHttpServer({ config, service, store, scheduler, actions, version });
+  const server = createHttpServer({ config, service, store, settings, scheduler, actions, version });
   server.listen(config.port, config.host, () => {
-    console.log(`[init] REST 监听 http://${config.host}:${config.port}(需 Bearer 令牌)`);
+    console.log(`[init] REST 与 WebUI 监听 http://${config.host}:${config.port}`);
     console.log(`[init] 账号数 ${store.list().length},启用 ${store.list({ enabledOnly: true }).length}`);
   });
 

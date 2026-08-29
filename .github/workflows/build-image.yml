@@ -19,7 +19,7 @@ jobs:
         with:
           node-version: "24"
       - name: 语法检查
-        run: for f in $(find src -name '*.mjs'); do node --check "$f"; done
+        run: for f in $(find src -name '*.mjs' -o -name '*.js'); do node --check "$f"; done
       - name: 冒烟测试
         run: node test/smoke.mjs
 

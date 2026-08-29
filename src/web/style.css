@@ -1,0 +1,230 @@
+:root {
+  --bg: #14161a;
+  --card: #1d2128;
+  --line: #2c313b;
+  --fg: #e6e8ec;
+  --muted: #969ba6;
+  --accent: #4c8dff;
+  --danger: #e06060;
+  --ok: #57b87a;
+}
+
+* { box-sizing: border-box; }
+
+/* 作者样式表里的 display 会盖掉 UA 的 [hidden]{display:none},
+   .gate/.card/label 都设了 display:flex,不加这条 hidden 属性就形同虚设。 */
+[hidden] { display: none !important; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font: 14px/1.6 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+}
+
+h1 { font-size: 18px; margin: 0; }
+h2 { font-size: 16px; margin: 0; }
+h3 { font-size: 14px; margin: 0 0 12px; }
+
+a { color: var(--accent); }
+code { font-family: ui-monospace, Consolas, monospace; }
+
+.gate {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  padding: 20px;
+}
+
+.gate .card { width: 100%; max-width: 360px; }
+
+header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--line);
+}
+
+.header-right { display: flex; align-items: center; gap: 12px; }
+
+nav {
+  display: flex;
+  gap: 4px;
+  padding: 0 20px;
+  border-bottom: 1px solid var(--line);
+}
+
+.tab {
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--muted);
+  padding: 10px 14px;
+  cursor: pointer;
+  font-size: 14px;
+}
+
+.tab.active { color: var(--fg); border-bottom-color: var(--accent); }
+.tab:hover { color: var(--fg); }
+
+main { padding: 20px; max-width: 900px; }
+
+.panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 14px;
+  gap: 12px;
+}
+
+.card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 16px;
+  margin-bottom: 16px;
+}
+
+.card.danger { border-color: #4a2f2f; }
+
+label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+input, select, textarea {
+  background: #12141a;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--fg);
+  padding: 8px 10px;
+  font: inherit;
+  width: 100%;
+}
+
+textarea { font-family: ui-monospace, Consolas, monospace; font-size: 12px; min-height: 130px; resize: vertical; }
+
+input:focus, select:focus, textarea:focus { outline: none; border-color: var(--accent); }
+
+button {
+  background: var(--accent);
+  border: none;
+  border-radius: 6px;
+  color: #fff;
+  padding: 8px 14px;
+  font: inherit;
+  cursor: pointer;
+  align-self: flex-start;
+}
+
+button:hover { filter: brightness(1.1); }
+button:disabled { opacity: .5; cursor: default; filter: none; }
+
+button.ghost { background: none; border: 1px solid var(--line); color: var(--fg); }
+button.small { padding: 5px 10px; font-size: 13px; }
+button.warn-btn { background: var(--danger); }
+
+.row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.inline-form { max-width: 420px; }
+
+.list { display: flex; flex-direction: column; gap: 12px; }
+
+.account {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 14px 16px;
+}
+
+.account-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.account-title { display: flex; align-items: center; gap: 8px; }
+.account-name { font-weight: 600; }
+
+.badge {
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  padding: 2px 9px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.badge.on { color: var(--ok); border-color: #2c4a37; }
+.badge.off { color: var(--danger); border-color: #4a2f2f; }
+
+.meta { color: var(--muted); font-size: 12px; margin: 6px 0 0; }
+.actions { margin-top: 12px; }
+.rules { margin-top: 12px; }
+.rules summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+.rules > div { margin-top: 10px; display: flex; flex-direction: column; gap: 8px; }
+
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--line); }
+th { color: var(--muted); font-weight: 500; }
+td.status-ok { color: var(--ok); }
+td.status-bad { color: var(--danger); }
+
+.hint { color: var(--muted); font-size: 12px; margin: 0; }
+.error { color: var(--danger); font-size: 13px; margin: 0; min-height: 1.6em; }
+.warn { color: #d9a441; font-size: 13px; margin: 0 0 6px; }
+
+.token-out {
+  display: block;
+  background: #12141a;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 10px;
+  word-break: break-all;
+  font-size: 13px;
+}
+
+.toast {
+  position: fixed;
+  bottom: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 10px 18px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, .4);
+  margin: 0;
+  max-width: 90vw;
+}
+
+.toast.bad { border-color: #4a2f2f; color: #f0b0b0; }
+
+pre.out {
+  background: #12141a;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 10px;
+  margin: 10px 0 0;
+  font-size: 12px;
+  max-height: 260px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+@media (max-width: 560px) {
+  main { padding: 14px; }
+  header { padding: 12px 14px; }
+  nav { padding: 0 8px; }
+  .tab { padding: 10px 10px; }
+}

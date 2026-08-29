@@ -30,9 +30,30 @@ curl -X POST http://127.0.0.1:18090/accounts/主号/verify \
 
 `PLACEGAME_MASTER_KEY_B64` 丢失后已存账号无法解密，务必备份。
 
+## WebUI
+
+浏览器打开服务根路径即可。首次访问要求用 `.env` 里的 `PLACEGAME_API_TOKEN` 验证身份，
+并设置一个至少 12 位的 WebUI 密码 —— 这样不必再往配置文件里塞第二个长期密码。
+之后凭密码登录，可以管理账号、编辑规则、手动触发日常、查执行记录，以及：
+
+- 改 WebUI 登录密码（需验旧密码，改完其他设备的登录状态立即作废）
+- 改某个账号的游戏密码（改完该账号的游戏会话作废，下次动作用新密码重新登录）
+- 轮换 API 令牌
+
+**轮换令牌的后果**：新令牌加密存库并立即生效，旧令牌当即 401。所有还在用旧令牌的 agent
+必须同步更新，否则会一直失败。`.env` 里那个值从此不再生效但仍留在文件里，
+若曾泄露请手动删除。生效值的来源可以从 `GET /health/ready` 的 `apiTokenSource` 看出
+（`db` = 已轮换过，`env` = 还在用 `.env` 里的引导值）。
+
+页面本身不含任何机密，数据全靠登录后的 XHR 取。会话 cookie 是 `HttpOnly` + `SameSite=Strict`，
+写操作额外要求 `x-csrf-token` 头。密码用 scrypt 加盐存储，同一 IP 连续 5 次登录失败锁 15 分钟。
+
+直连明文 HTTP 调试时需设 `PLACEGAME_WEB_SECURE_COOKIE=false`，否则浏览器不回传 cookie，登录会一直失败。
+
 ## 接口
 
-账号可用 `label` 或 `id` 定位。除健康检查外都需要 `authorization: Bearer <PLACEGAME_API_TOKEN>`。
+账号可用 `label` 或 `id` 定位。除健康检查外都需要鉴权，两条路都认：
+agent 用 `authorization: Bearer <令牌>`，浏览器用 WebUI 登录后的会话 cookie。
 响应统一为 `{"ok":true,"data":...}` 或 `{"ok":false,"error":"..."}`。
 
 ### 健康检查（免鉴权）
@@ -40,7 +61,7 @@ curl -X POST http://127.0.0.1:18090/accounts/主号/verify \
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/health/live` | 进程存活 |
-| GET | `/health/ready` | 含版本、账号数、排程状态 |
+| GET | `/health/ready` | 含版本、账号数、排程状态、`apiTokenSource`、`webPasswordSet` |
 
 ### 账号管理
 
@@ -81,6 +102,21 @@ curl -X POST http://127.0.0.1:18090/accounts/主号/verify \
 | GET | `/accounts/:id/tasks` | 该号执行记录 |
 | POST | `/scheduler/tick` | 手动触发一轮 |
 
+### WebUI 会话与设置
+
+供页面自己调用。agent 用不上这几个，除了首次要用 Bearer 令牌完成初始设置。
+
+| 方法 | 路径 | 鉴权 | 说明 |
+|---|---|---|---|
+| GET | `/api/web/session` | 免 | 探测是否需要初始设置、当前是否已登录 |
+| POST | `/api/web/setup` | 仅 Bearer | 设第一个 WebUI 密码，`{password}`；已设过返回 409 |
+| POST | `/api/web/login` | 免 | `{password}`，成功下发会话 cookie 并返回 `csrfToken` |
+| POST | `/api/web/logout` | 免 | 作废当前会话 |
+| POST | `/api/web/password` | 会话 | `{currentPassword, newPassword}`，作废其他会话 |
+| POST | `/api/web/api-token` | 会话 | `{currentPassword, token?}`，`token` 留空则随机生成 |
+
+`/api/web/api-token` 的响应是新令牌明文唯一一次出现的地方，之后无法再读出。
+
 ### 错误码
 
 `404` 账号或端点不存在 · `409` 账号已停用 · `413` 请求体过大 · `502` 游戏服务端出错 ·
@@ -106,7 +142,15 @@ curl -X POST http://127.0.0.1:18090/accounts/主号/verify \
 - 接口响应只返回 `publicView`，不含密文也不含明文
 - 连续 5 次认证失败（15 分钟滑动窗口）自动停用账号，避免锁号
 - API 令牌用常量时间比较
-- 主密钥与 API 令牌只从环境变量读，不落配置文件
+- 主密钥只从环境变量读，永不落库也不可改
+- API 令牌轮换后加密存库；未轮换时用 `.env` 里的引导值
+- WebUI 密码 scrypt 加盐存储；会话表只存令牌的 SHA-256，库泄露也无法复用会话
+- 同一 IP 连续 5 次登录失败锁 15 分钟（按 IP 而非全局，免得有人把管理员锁在门外）
+- 会话写操作要 `x-csrf-token`，与 `SameSite=Strict` 叠成两层
+- 静态资源启动时按白名单读进内存，每请求不碰文件系统，路径穿越无从下手
+
+公网暴露时至少要有 HTTPS 反代 + 足够长的 WebUI 密码。这个端口一旦上公网，
+扫描器会持续探测登录页，密码强度是最后一道防线。
 
 ## 开发
 

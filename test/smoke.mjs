@@ -14,6 +14,8 @@ process.env.PLACEGAME_MASTER_KEY_B64 = randomBytes(32).toString("base64url");
 process.env.PLACEGAME_API_TOKEN = "test-token-abc";
 process.env.PLACEGAME_DB_PATH = DB;
 process.env.PLACEGAME_SCHEDULER = "false";
+// 测试走明文 HTTP,Secure cookie 会让真实浏览器拒收;这里也顺带覆盖该配置分支
+process.env.PLACEGAME_WEB_SECURE_COOKIE = "false";
 
 let passed = 0;
 let failed = 0;
@@ -129,6 +131,7 @@ const { AccountStore } = await import("../src/accounts/store.mjs");
 const { AccountService } = await import("../src/accounts/service.mjs");
 const { Scheduler } = await import("../src/scheduler.mjs");
 const { createHttpServer } = await import("../src/http-server.mjs");
+const { SettingsStore } = await import("../src/settings.mjs");
 const { buildActions } = await import("../src/actions.mjs");
 const { unwrap } = await import("../src/util.mjs");
 
@@ -157,6 +160,10 @@ try {
     .join("\n");
   const orphans = documented.filter((v) => !src.includes(v));
   check("env 文档与代码一致", orphans.length === 0, `代码未读取:${orphans.join(", ")}`);
+  // 反向:代码读了但文档没写,用户根本不知道有这个开关
+  const used = new Set([...src.matchAll(/PLACEGAME_[A-Z0-9_]+/g)].map((m) => m[0]));
+  const undocumented = [...used].filter((v) => !documented.includes(v));
+  check("代码读到的变量都有文档", undocumented.length === 0, `文档缺失:${undocumented.join(", ")}`);
 }
 
 console.log("\n[2] unwrap 处理 patch 包装");
@@ -231,16 +238,27 @@ store.setSecret(store.getByLabel("fzx401").id, "password", "secret");
 check("恢复后失败计数清零", store.getByLabel("fzx401").auth_failure_count === 0);
 
 console.log("\n[6] REST 接口");
-const server = createHttpServer({ config, service, store, scheduler, actions, version: "0.2.50", logger: { log() {}, error() {} } });
+const settings = new SettingsStore(db, new SecretBox(config.masterKeyB64), {
+  envApiToken: config.apiToken,
+  sessionHours: config.webSessionHours
+});
+const server = createHttpServer({ config, service, store, settings, scheduler, actions, version: "0.2.50", logger: { log() {}, error() {} } });
 await new Promise((r) => server.listen(0, "127.0.0.1", r));
 const base = `http://127.0.0.1:${server.address().port}`;
-const call = async (method, path, { token = config.apiToken, body } = {}) => {
+const call = async (method, path, { token = config.apiToken, body, cookie, csrf, ip } = {}) => {
   const res = await fetch(`${base}${path}`, {
     method,
-    headers: { ...(token ? { authorization: `Bearer ${token}` } : {}), "content-type": "application/json" },
+    headers: {
+      ...(token ? { authorization: `Bearer ${token}` } : {}),
+      ...(cookie ? { cookie } : {}),
+      ...(csrf ? { "x-csrf-token": csrf } : {}),
+      // 登录限流按 IP 计数,各用例用不同 IP 才不会互相污染
+      ...(ip ? { "x-real-ip": ip } : {}),
+      "content-type": "application/json"
+    },
     body: body === undefined ? undefined : JSON.stringify(body)
   });
-  return { status: res.status, json: await res.json() };
+  return { status: res.status, json: await res.json(), setCookie: res.headers.getSetCookie?.() ?? [] };
 };
 
 check("健康检查免鉴权", (await call("GET", "/health/live", { token: null })).status === 200);
@@ -268,6 +286,123 @@ check("停用后动作 409", (await call("POST", "/accounts/fzx401/collect", { b
 await call("POST", "/accounts/fzx401/enable");
 const tasks = await call("GET", "/tasks");
 check("排程状态", tasks.status === 200 && tasks.json.data.scheduler.timezone === "Asia/Shanghai");
+
+console.log("\n[7] WebUI 鉴权与设置");
+const WEB_PW = "correct-horse-battery-staple";
+
+for (const [path, type] of [["/", "text/html"], ["/app.js", "javascript"], ["/style.css", "text/css"]]) {
+  const res = await fetch(`${base}${path}`);
+  check(`静态资源 ${path}`, res.status === 200 && res.headers.get("content-type").includes(type));
+}
+
+const sess0 = await call("GET", "/api/web/session", { token: null });
+check("未设密码时提示需初始化", sess0.json.data.needsSetup === true && sess0.json.data.authenticated === false);
+check("ready 报令牌来源为 env", ready.json.data.apiTokenSource === "env" && ready.json.data.webPasswordSet === false);
+
+check("初始设置需令牌", (await call("POST", "/api/web/setup", { token: null, body: { password: WEB_PW } })).status === 401);
+check("初始设置拒短密码", (await call("POST", "/api/web/setup", { body: { password: "short" } })).status === 400);
+check("初始设置成功", (await call("POST", "/api/web/setup", { body: { password: WEB_PW } })).status === 200);
+check("重复初始设置 409", (await call("POST", "/api/web/setup", { body: { password: WEB_PW } })).status === 409);
+
+// 登录:错密码不给会话,对密码给会话
+const badLogin = await call("POST", "/api/web/login", { token: null, ip: "10.0.0.1", body: { password: "wrong" } });
+check("错密码 401", badLogin.status === 401 && badLogin.setCookie.length === 0);
+
+const login = await call("POST", "/api/web/login", { token: null, ip: "10.0.0.2", body: { password: WEB_PW } });
+const rawCookie = login.setCookie[0] ?? "";
+check("登录返回会话 cookie", login.status === 200 && rawCookie.includes("pg_session="));
+check("cookie 带 HttpOnly/SameSite", rawCookie.includes("HttpOnly") && rawCookie.includes("SameSite=Strict"), rawCookie);
+check("测试环境不加 Secure", !rawCookie.includes("Secure"), rawCookie);
+const cookie = rawCookie.split(";")[0];
+const csrf = login.json.data.csrfToken;
+check("登录返回 csrfToken", typeof csrf === "string" && csrf.length > 20);
+
+// 会话可访问受保护端点,且 GET 不需要 CSRF
+const byCookie = await call("GET", "/accounts", { token: null, cookie });
+check("会话可列账号", byCookie.status === 200 && byCookie.json.data.length === 1);
+check("会话被识别", (await call("GET", "/api/web/session", { token: null, cookie })).json.data.authenticated === true);
+check("伪造 cookie 401", (await call("GET", "/accounts", { token: null, cookie: "pg_session=forged" })).status === 401);
+
+// 写操作必须带 CSRF 头
+check(
+  "会话写操作缺 CSRF 403",
+  (await call("POST", "/accounts/fzx401/collect", { token: null, cookie, body: {} })).status === 403
+);
+check(
+  "错 CSRF 403",
+  (await call("POST", "/accounts/fzx401/collect", { token: null, cookie, csrf: "nope", body: {} })).status === 403
+);
+check(
+  "带 CSRF 可写",
+  (await call("POST", "/accounts/fzx401/collect", { token: null, cookie, csrf, body: {} })).status === 200
+);
+// Bearer 走 agent 通道,本就无 cookie 可被诱导,不该被 CSRF 拦
+check("Bearer 写操作免 CSRF", (await call("POST", "/accounts/fzx401/collect", { body: {} })).status === 200);
+
+// 每 IP 独立限流:同一 IP 连错 5 次锁定,换 IP 不受影响
+for (let i = 0; i < 5; i++) await call("POST", "/api/web/login", { token: null, ip: "10.0.0.9", body: { password: "wrong" } });
+const locked = await call("POST", "/api/web/login", { token: null, ip: "10.0.0.9", body: { password: WEB_PW } });
+check("同 IP 连错 5 次锁定", locked.status === 429, String(locked.status));
+check(
+  "锁定不影响其他 IP",
+  (await call("POST", "/api/web/login", { token: null, ip: "10.0.0.10", body: { password: WEB_PW } })).status === 200
+);
+
+// 轮换令牌:旧令牌立刻失效,新令牌可用,来源转为 db
+const rotated = await call("POST", "/api/web/api-token", {
+  token: null,
+  cookie,
+  csrf,
+  body: { currentPassword: WEB_PW }
+});
+check("轮换令牌成功", rotated.status === 200 && typeof rotated.json.data.token === "string");
+const newToken = rotated.json.data.token;
+check("新令牌够长", newToken.length >= 40, String(newToken.length));
+check("旧令牌失效", (await call("GET", "/accounts", { token: "test-token-abc" })).status === 401);
+check("新令牌可用", (await call("GET", "/accounts", { token: newToken })).status === 200);
+check(
+  "ready 报令牌来源转为 db",
+  (await call("GET", "/health/ready", { token: null })).json.data.apiTokenSource === "db"
+);
+check(
+  "轮换需密码",
+  (await call("POST", "/api/web/api-token", { token: null, cookie, csrf, body: { currentPassword: "wrong" } })).status === 401
+);
+
+// 改密:验旧密码,且作废其他会话
+const other = await call("POST", "/api/web/login", { token: null, ip: "10.0.0.11", body: { password: WEB_PW } });
+const otherCookie = (other.setCookie[0] ?? "").split(";")[0];
+check("第二个会话可用", (await call("GET", "/accounts", { token: null, cookie: otherCookie })).status === 200);
+check(
+  "改密需旧密码",
+  (await call("POST", "/api/web/password", { token: null, cookie, csrf, body: { currentPassword: "wrong", newPassword: "a".repeat(12) } })).status === 401
+);
+const NEW_PW = "another-long-password-99";
+const changed = await call("POST", "/api/web/password", {
+  token: null,
+  cookie,
+  csrf,
+  body: { currentPassword: WEB_PW, newPassword: NEW_PW }
+});
+check("改密成功", changed.status === 200);
+check("其他会话被作废", (await call("GET", "/accounts", { token: null, cookie: otherCookie })).status === 401);
+check("本会话仍有效", (await call("GET", "/accounts", { token: null, cookie })).status === 200);
+check("旧密码登录失败", (await call("POST", "/api/web/login", { token: null, ip: "10.0.0.12", body: { password: WEB_PW } })).status === 401);
+check("新密码登录成功", (await call("POST", "/api/web/login", { token: null, ip: "10.0.0.13", body: { password: NEW_PW } })).status === 200);
+
+// 登出后会话立即不可用
+await call("POST", "/api/web/logout", { token: null, cookie, csrf });
+check("登出后会话失效", (await call("GET", "/accounts", { token: null, cookie })).status === 401);
+
+// 密码哈希与会话令牌都不该以明文落库
+{
+  const rows = db.prepare("SELECT key, value FROM settings").all();
+  const dump = JSON.stringify(rows);
+  check("库中无明文密码", !dump.includes(NEW_PW) && !dump.includes(WEB_PW));
+  check("库中无明文令牌", !dump.includes(newToken));
+  const ids = db.prepare("SELECT id FROM web_sessions").all().map((r) => r.id);
+  check("会话表只存哈希", ids.every((id) => /^[0-9a-f]{64}$/.test(id)), JSON.stringify(ids));
+}
 
 server.close();
 db.close();

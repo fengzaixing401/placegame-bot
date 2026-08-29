@@ -43,6 +43,23 @@ CREATE TABLE IF NOT EXISTS job_runs (
 
 CREATE INDEX IF NOT EXISTS idx_job_runs_account_job
   ON job_runs (account_id, job_key, started_at DESC);
+
+CREATE TABLE IF NOT EXISTS settings (
+  key        TEXT PRIMARY KEY,
+  value      TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+-- id 是会话令牌的 SHA-256,不存令牌本身:库泄露也无法复用会话
+CREATE TABLE IF NOT EXISTS web_sessions (
+  id         TEXT PRIMARY KEY,
+  csrf_token TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_web_sessions_expires
+  ON web_sessions (expires_at);
 `;
 
 export function openDb(dbPath) {
