@@ -1,0 +1,16 @@
+{
+  "name": "placegame-bot",
+  "version": "0.1.0",
+  "description": "PlaceGame 挂机游戏自动化工具:多账号 + HTTP API + 定时排程,可被 agent 操控",
+  "type": "module",
+  "main": "src/index.mjs",
+  "scripts": {
+    "start": "node src/index.mjs",
+    "test": "node test/smoke.mjs",
+    "check": "for f in $(find src -name '*.mjs'); do node --check \"$f\"; done"
+  },
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "license": "UNLICENSED"
+}

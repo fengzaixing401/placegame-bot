@@ -1,0 +1,22 @@
+services:
+  placegame-bot:
+    image: ghcr.io/fengzaixing401/placegame-bot:latest
+    container_name: placegame-bot
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      TZ: Asia/Shanghai
+      PLACEGAME_DB_PATH: /data/placegame.db
+    ports:
+      # 只绑本机,公网访问请走反向代理。18080 已被 placegame-mcp 占用,故默认 18090
+      - "127.0.0.1:${PLACEGAME_HOST_PORT:-18090}:8080"
+    volumes:
+      - placegame-data:/data
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  placegame-data:

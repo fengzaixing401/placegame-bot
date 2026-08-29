@@ -1,0 +1,12 @@
+.git
+.github
+node_modules
+data
+test
+*.md
+.env
+.env.*
+!.env.example
+*.db
+*.db-wal
+*.db-shm
