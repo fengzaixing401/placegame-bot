@@ -13,6 +13,7 @@ const SESSION_COOKIE = "pg_session";
 const WEB_DIR = join(dirname(fileURLToPath(import.meta.url)), "web");
 const WEB_ASSETS = [
   ["/", "index.html", "text/html; charset=utf-8"],
+  ["/log.js", "log.js", "text/javascript; charset=utf-8"],
   ["/app.js", "app.js", "text/javascript; charset=utf-8"],
   ["/style.css", "style.css", "text/css; charset=utf-8"]
 ];

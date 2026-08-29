@@ -205,8 +205,76 @@ check("会话过期时间落库", store.getByLabel("fzx401").session_expires_at 
 const col = await service.run("fzx401", (api, row) => actions.collect(api, row));
 check("收益两阶段冒险流程", col.adventureResolved === true && col.adventureOptionKey === "opt_a", JSON.stringify(col.collected));
 
-const inv = await service.run("fzx401", (api, row) => actions.inventory(api, row, { mode: "explicit" }));
-check("分解只选 in_bag 未锁(e1)", inv.decomposed === 1 && inv.equipmentIds[0] === "e1", JSON.stringify(inv.equipmentIds));
+// explicit 必须带收紧条件,这里按品质筛 common:e1 拆,e2 锁着、e3 穿着、e4 在仓库都留
+const inv = await service.run("fzx401", (api, row) =>
+  actions.inventory(api, row, { mode: "explicit", conditions: { qualities: ["common"] } })
+);
+check("分解只选 in_bag 未锁(e1)", inv.equipmentIds?.length === 1 && inv.equipmentIds[0] === "e1", JSON.stringify(inv.equipmentIds));
+check("逐件给出保留原因", inv.kept.some((k) => k.equipmentId === "e2" && /锁/.test(k.reason)), JSON.stringify(inv.kept));
+
+// 一个收紧条件都不给会拆光背包,必须在发请求前就被拦下
+let allBagGuard = null;
+try {
+  await service.run("fzx401", (api, row) => actions.inventory(api, row, { mode: "explicit", conditions: {} }));
+} catch (err) {
+  allBagGuard = err.message;
+}
+check("explicit 无条件被拦下", /至少要设一个收紧条件/.test(allBagGuard ?? ""), String(allBagGuard));
+
+// keepRareRank 只保护极品,不构成收紧条件,同样要被拦
+let rareOnlyGuard = null;
+try {
+  await service.run("fzx401", (api, row) =>
+    actions.inventory(api, row, { mode: "explicit", conditions: { keepRareRank: true } })
+  );
+} catch (err) {
+  rareOnlyGuard = err.message;
+}
+check("只勾保留极品不算收紧条件", /至少要设一个收紧条件/.test(rareOnlyGuard ?? ""), String(rareOnlyGuard));
+
+// auto 没有预览端点,dryRun 必须报错而不是静默真拆
+let autoPreviewGuard = null;
+try {
+  await service.run("fzx401", (api, row) => actions.inventory(api, row, { mode: "auto", dryRun: true }));
+} catch (err) {
+  autoPreviewGuard = err.message;
+}
+check("auto 模式拒绝预览", /没有预览端点/.test(autoPreviewGuard ?? ""), String(autoPreviewGuard));
+
+// maxScore:0 能骗过收紧条件校验(typeof 0 === "number"),却筛不中任何一件 ——
+// 静默拆不动东西比报错更难查。前端空输入必须读成 null 而不是 Number("")===0,
+// 这条测试守的是"0 不等于不限制"这个语义。
+const zeroCond = await service.run("fzx401", (api, row) =>
+  actions.inventory(api, row, { mode: "explicit", conditions: { maxScore: 0 } })
+);
+check("maxScore:0 一件都不拆", zeroCond.matched === 0, JSON.stringify(zeroCond.matched));
+// 原本唯一会被拆的 e1 现在也留下了,原因落在评分条件上
+check(
+  "maxScore:0 让 e1 因评分被留下",
+  /评分/.test(zeroCond.kept.find((k) => k.equipmentId === "e1")?.reason ?? ""),
+  JSON.stringify(zeroCond.kept.map((k) => `${k.equipmentId}:${k.reason}`))
+);
+
+// 页面存规则时"没填"落库为 null(不是 0)。null 必须被当成没设这个条件:
+// 既不参与收紧条件判定,也不参与筛选。这是 WebUI 实际写进库的形状。
+const nullCond = await service.run("fzx401", (api, row) =>
+  actions.inventory(api, row, {
+    mode: "explicit",
+    conditions: { maxScore: null, maxLevel: null, qualities: ["common"], keepRareRank: true, keepAttrs: [] }
+  })
+);
+check("null 条件不影响筛选,仍按品质拆 e1", nullCond.equipmentIds?.length === 1 && nullCond.equipmentIds[0] === "e1", JSON.stringify(nullCond.equipmentIds));
+
+// 只有 null 条件、没有品质时,等于什么都没设,必须被拦下
+let nullOnlyGuard = null;
+try {
+  await service.run("fzx401", (api, row) =>
+    actions.inventory(api, row, { mode: "explicit", conditions: { maxScore: null, maxLevel: null, qualities: [] } })
+  );
+} catch (err) {
+  nullOnlyGuard = err.message;
+}
+check("全 null 条件被拦下", /至少要设一个收紧条件/.test(nullOnlyGuard ?? ""), String(nullOnlyGuard));
 
 const prof = await service.run("fzx401", (api, row) => actions.profession(api, row));
 check("副职 settle+select+enqueue", prof.settled && prof.selected?.selected === "fishing" && prof.enqueued[0]?.count === 5);

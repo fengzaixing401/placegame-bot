@@ -11,6 +11,11 @@ import * as activity from "./features/activity.mjs";
 export function buildActions(config) {
   const rules = (row) => rulesFor(config, row?.rules_json ? JSON.parse(row.rules_json) : null);
 
+  // WebUI 的操作面板执行时把当前表单值作为本次覆盖发进来,不落库。
+  // 整块替换而非深合并:否则页面上取消勾选某项永远生效不了。
+  const withOverride = (base, override) =>
+    override && typeof override === "object" && !Array.isArray(override) ? { ...base, ...override } : base;
+
   const actions = {
     async collect(api, row, args = {}) {
       return collectFeature.collect(api, { adventureOptionKey: args?.adventureOptionKey });
@@ -25,7 +30,9 @@ export function buildActions(config) {
       return inventory.decompose(api, {
         mode: args?.mode ?? r.mode,
         equipmentIds: args?.equipmentIds,
-        maxQuality: args?.maxQuality ?? r.maxQuality,
+        // 整块替换而非逐字段合并:页面面板每次都发全套条件,
+        // 逐字段兜底会让"清空某个条件"永远生效不了。
+        conditions: args?.conditions ?? r.conditions ?? {},
         dryRun: args?.dryRun === true
       });
     },
@@ -52,7 +59,7 @@ export function buildActions(config) {
     // types 不在这里兜底:交给 runBosses 按 challengePersonal 决定,
     // 免得这里写死 PERSONAL 把"个人首领默认不打"的设置绕过去
     "boss.map": async (api, row, args = {}) => {
-      const r = rules(row).boss;
+      const r = withOverride(rules(row).boss, args?.rules);
       return boss.runBosses(api, {
         types: args?.types,
         rules: r,
@@ -62,7 +69,7 @@ export function buildActions(config) {
     },
 
     "boss.world": async (api, row, args = {}) => {
-      const r = rules(row).boss;
+      const r = withOverride(rules(row).boss, args?.rules);
       return boss.runWorldBoss(api, { rules: r, assistOnly: args?.assistOnly === true });
     },
 
@@ -82,9 +89,12 @@ export function buildActions(config) {
     // 只读:给 WebUI 表单喂真实可选项,避免让用户手写 key。
     // 单项失败不影响其余,表单能渲染多少算多少。
     async options(api) {
-      const [snapshot, bag] = await Promise.all([
+      const [snapshot, bag, equipment, profView] = await Promise.all([
         boss.bossSnapshot(api).catch((err) => ({ error: err.message, bosses: [] })),
-        guild.donatableItems(api).catch((err) => ({ error: err.message }))
+        guild.donatableItems(api).catch((err) => ({ error: err.message })),
+        // 品质与属性名都取自真实背包,不写死枚举 —— 见 inventory.equipmentSummary
+        inventory.equipmentSummary(api).catch((err) => ({ error: err.message })),
+        profession.view(api).catch((err) => ({ error: err.message }))
       ]);
       const bosses = snapshot.bosses ?? [];
       return {
@@ -102,7 +112,13 @@ export function buildActions(config) {
         freeAttemptsLeft: boss.freeAttemptsLeft(snapshot.personalAttempts),
         donatableItems: Array.isArray(bag) ? bag : [],
         professions: profession.PROFESSIONS,
-        errors: [snapshot.error, bag?.error].filter(Boolean)
+        // 副职动作:排队表单用,取游戏返回的 key+中文名,避免让用户手写 key
+        professionActions: Array.isArray(profView?.actions)
+          ? profView.actions.map((a) => ({ key: a.key ?? a.actionKey ?? null, name: a.name ?? null })).filter((a) => a.key)
+          : [],
+        // 分解条件表单用:品质取值+件数、属性键全集、可分解件数
+        equipment: equipment?.error ? { total: 0, disposable: 0, qualities: [], attrKeys: [], rareRanks: [] } : equipment,
+        errors: [snapshot.error, bag?.error, equipment?.error, profView?.error].filter(Boolean)
       };
     },
 

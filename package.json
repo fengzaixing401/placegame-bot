@@ -6,7 +6,7 @@
   "main": "src/index.mjs",
   "scripts": {
     "start": "node src/index.mjs",
-    "test": "node test/smoke.mjs",
+    "test": "node test/smoke.mjs && node test/log-render.mjs",
     "check": "for f in $(find src -name '*.mjs' -o -name '*.js'); do node --check \"$f\"; done"
   },
   "engines": {

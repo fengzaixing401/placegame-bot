@@ -24,8 +24,17 @@ const DEFAULTS = {
     },
     inventory: {
       enabled: true,
-      mode: "auto", // auto = 用服务端 auto-decompose 规则;explicit = 按本地条件挑选
-      intervalHours: 11
+      mode: "auto", // auto = 用服务端 auto-decompose 规则;explicit = 按下面 conditions 挑选
+      intervalHours: 11,
+      // explicit 模式的分解条件。默认全空 —— 空条件会被 hasNarrowingCondition 拦下,
+      // 所以不配就用不了 explicit,这比给一组"看起来合理"的默认阈值安全。
+      conditions: {
+        maxScore: null, // 评分低于此值才拆(null = 不看评分)
+        maxLevel: null, // 装备等级不高于此值才拆
+        qualities: [], // 可分解品质白名单,空 = 不按品质筛
+        keepRareRank: true, // 带极品词条的一律保留
+        keepAttrs: [] // 命中这些属性名就保留
+      }
     },
     profession: {
       enabled: true,

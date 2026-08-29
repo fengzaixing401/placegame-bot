@@ -136,15 +136,25 @@ for (const tab of document.querySelectorAll(".tab")) {
 
 // ---- 账号 ----
 
+// 操作清单。点按钮只展开面板,不发请求 —— 执行一律要面板里那颗「确定执行」。
+// panel 为空表示该操作没有可调参数,面板里只有一句说明和确认按钮。
+// preview: 该操作支持 dryRun,面板里给一颗「只预览」。
+// job 是日志渲染器的键,与排程任务、任务记录里的键同名,渲染逻辑只此一份。
 const ACTIONS = [
-  ["collect", "收挂机收益"],
-  ["inventory/decompose", "背包分解"],
-  ["profession/settle", "副职结算"],
-  ["guild/daily", "公会日常"],
-  ["boss/map", "地图首领"],
-  ["boss/world", "世界首领"],
-  ["activity/claim-all", "领活动奖励"],
-  ["daily-run", "一键全部日常"]
+  { path: "collect", job: "collect", label: "收挂机收益", panel: null, note: "把挂机攒下的经验金币收进账。有冒险事件会顺手选第一个选项。" },
+  { path: "inventory/decompose", job: "inventory", label: "背包分解", panel: "inventory", preview: true },
+  { path: "profession/settle", job: "profession", label: "副职结算", panel: "profession" },
+  { path: "guild/daily", job: "guild", label: "公会日常", panel: "guild" },
+  { path: "boss/map", job: "boss.map", label: "地图首领", panel: "bossMap", preview: true },
+  { path: "boss/world", job: "boss.world", label: "世界首领", panel: "bossWorld" },
+  { path: "activity/claim-all", job: "activity", label: "领活动奖励", panel: "activity" },
+  {
+    path: "daily-run",
+    job: "dailyRun",
+    label: "一键全部日常",
+    panel: null,
+    note: "按已保存的规则依次执行:收益、分解、副职、公会、地图首领、活动奖励。用的是保存过的规则,不是上面各面板里的临时改动。"
+  }
 ];
 
 // ---- 规则表单 ----
@@ -177,13 +187,19 @@ function fBool(labelText, value, hint) {
   return { node, read: () => box.checked };
 }
 
-function fNum(labelText, value, { min, max, step, hint } = {}) {
+// 空输入读作 null(未设置),不是 Number("")===0。写成 0 会把"不限制"变成"上限 0":
+// 分解的收紧条件校验只看 typeof === "number",0 能骗过校验,却又筛不中任何一件,
+// 存进规则后排程就永久静默拆不动东西。
+// required 的字段(间隔、次数)不允许没有值,清空时兜回渲染时的原值。
+function fNum(labelText, value, { min, max, step, hint, required = false } = {}) {
   const input = el("input", { type: "number", value: value ?? "", min, max, step });
+  const fallback = () => (required ? value ?? null : null);
   return {
     node: field(labelText, input, hint),
     read: () => {
+      if (input.value.trim() === "") return fallback();
       const n = Number(input.value);
-      return Number.isFinite(n) ? n : null;
+      return Number.isFinite(n) ? n : fallback();
     }
   };
 }
@@ -371,75 +387,317 @@ function itemRow(init, { placeholder, items }) {
   };
 }
 
-function rulesForm(r, opts) {
-  const bosses = opts?.bosses ?? [];
-  const mapRows = bosses.filter((b) => b.type === "map");
-  const personalRows = bosses.filter((b) => b.type === "personal");
-  const items = opts?.donatableItems ?? [];
-  const free = opts?.freeAttemptsLeft;
+// 品质多选。取值一律用背包里真实存在的内部值(red/orange/…),不翻译成中文 ——
+// 分解不可逆,只有 red=传说 在真号掉落里确认过,标错中文名会让人拆掉不该拆的。
+function fQualities(value, qualities) {
+  const selected = new Set((value ?? []).map(String));
+  const boxes = [];
+  const list = el("div", { className: "checklist" });
+  const rows = Array.isArray(qualities) ? qualities : [];
+  if (!rows.length) {
+    // 没读到背包就退回文本框,不编枚举
+    const input = el("input", {
+      type: "text",
+      value: [...selected].join(","),
+      placeholder: "如 green,blue",
+      spellcheck: false
+    });
+    return {
+      node: field("可分解品质", input, "没读到背包,只能手填游戏内部取值,逗号分隔。留空 = 不按品质筛"),
+      read: () => input.value.split(",").map((s) => s.trim()).filter(Boolean)
+    };
+  }
+  for (const q of rows) {
+    const box = el("input", { type: "checkbox", checked: selected.has(String(q.quality)) });
+    boxes.push([box, String(q.quality)]);
+    list.append(
+      el("label", { className: "check-item" }, box, el("span", { textContent: `${q.quality}(${q.count} 件)` }))
+    );
+  }
+  return {
+    node: field("可分解品质", list, "取值是游戏内部品质值,件数取自当前背包。留空 = 不按品质筛"),
+    read: () => boxes.filter(([b]) => b.checked).map(([, v]) => v)
+  };
+}
 
+// 保留属性多选。属性名同样取自真实背包,不写死那 20 个词条。
+function fAttrs(value, attrKeys) {
+  const selected = new Set((value ?? []).map(String));
+  const rows = Array.isArray(attrKeys) ? attrKeys : [];
+  if (!rows.length) {
+    const input = el("input", {
+      type: "text",
+      value: [...selected].join(","),
+      placeholder: "如 attack,critical",
+      spellcheck: false
+    });
+    return {
+      node: field("命中这些属性时保留", input, "没读到背包,手填属性名,逗号分隔"),
+      read: () => input.value.split(",").map((s) => s.trim()).filter(Boolean)
+    };
+  }
+  const boxes = [];
+  const list = el("div", { className: "checklist wrap" });
+  for (const k of rows) {
+    const box = el("input", { type: "checkbox", checked: selected.has(String(k)) });
+    boxes.push([box, String(k)]);
+    list.append(el("label", { className: "check-item" }, box, el("span", { textContent: String(k) })));
+  }
+  return {
+    node: field("命中这些属性时保留", list, "属性名取自当前背包里的装备词条"),
+    read: () => boxes.filter(([b]) => b.checked).map(([, v]) => v)
+  };
+}
+
+// ---- 各操作的执行面板。返回 {node, read} —— read() 出的就是本次请求的 args ----
+// 面板里的改动只作用于本次执行,不落库;要长期生效得点「存为规则」。
+
+function panelInventory(r, opts) {
+  const c = r.inventory?.conditions ?? {};
+  const eq = opts?.equipment ?? {};
+  const mode = fSelect(
+    "模式",
+    r.inventory?.mode,
+    [["auto", "auto — 用游戏自带的自动分解规则"], ["explicit", "explicit — 按下面条件挑选"]],
+    "auto 由游戏决定拆哪些,本程序无从预览;explicit 才看下面的条件"
+  );
+  const maxScore = fNum("评分低于", c.maxScore, { min: 0, step: 1, hint: "留空 = 不看评分" });
+  const maxLevel = fNum("装备等级不高于", c.maxLevel, { min: 0, max: 999, step: 1, hint: "留空 = 不看等级" });
+  const qualities = fQualities(c.qualities, eq.qualities);
+  const keepRare = fBool("保留极品词条", c.keepRareRank !== false, "带极品词条的一律不拆");
+  const keepAttrs = fAttrs(c.keepAttrs, eq.attrKeys);
+
+  const fields = [mode, maxScore, maxLevel, qualities, keepRare, keepAttrs];
+  const stat =
+    typeof eq.disposable === "number"
+      ? `背包里可处理 ${eq.disposable} 件(共 ${eq.total} 件)。只看背包内、未锁定、未穿戴、未上架的装备。`
+      : "只处理背包内、未锁定、未穿戴、未上架的装备。";
+
+  return {
+    node: el("div", { className: "op-form" }, el("p", { className: "hint", textContent: stat }), ...fields.map((f) => f.node)),
+    read: () => {
+      const conditions = { keepRareRank: keepRare.read() };
+      const s = maxScore.read();
+      const lv = maxLevel.read();
+      if (s !== null) conditions.maxScore = s;
+      if (lv !== null) conditions.maxLevel = lv;
+      conditions.qualities = qualities.read();
+      conditions.keepAttrs = keepAttrs.read();
+      return { mode: mode.read(), conditions };
+    },
+    // explicit 模式下一个收紧条件都没有,后端会拒;提前说清楚,别让人对着报错猜
+    validate: () => {
+      if (mode.read() !== "explicit") return null;
+      const c2 = { maxScore: maxScore.read(), maxLevel: maxLevel.read(), qualities: qualities.read() };
+      const narrowed = c2.maxScore !== null || c2.maxLevel !== null || c2.qualities.length > 0;
+      return narrowed ? null : "explicit 模式至少要设一个收紧条件(评分、等级或品质),否则会拆光整个背包,后端会直接拒绝。";
+    },
+    // 存为规则时写回 inventory 分区
+    toRules: () => ({ inventory: { mode: mode.read(), conditions: readConditions() } })
+  };
+
+  function readConditions() {
+    const s = maxScore.read();
+    const lv = maxLevel.read();
+    return {
+      maxScore: s === null ? null : s,
+      maxLevel: lv === null ? null : lv,
+      qualities: qualities.read(),
+      keepRareRank: keepRare.read(),
+      keepAttrs: keepAttrs.read()
+    };
+  }
+}
+
+function panelProfession(r, opts) {
+  const prof = fSelect(
+    "副职",
+    r.profession?.professionKey,
+    [["", "不切换"], ...(opts?.professions ?? [])],
+    "留「不切换」则沿用游戏内当前副职"
+  );
+  const actions = opts?.professionActions ?? [];
+  const enqueue = fRows(
+    "结算后排队",
+    Object.entries(r.profession?.enqueue ?? {}).map(([actionKey, count]) => ({ actionKey, count })),
+    (init) => {
+      let ctl;
+      if (actions.length) {
+        ctl = el("select", {});
+        ctl.append(el("option", { value: "", textContent: "— 选择动作 —" }));
+        for (const a of actions) {
+          ctl.append(el("option", { value: a.key, textContent: a.name ?? a.key, selected: a.key === init?.actionKey }));
+        }
+        if (init?.actionKey && !actions.some((a) => a.key === init.actionKey)) {
+          ctl.append(el("option", { value: init.actionKey, textContent: `${init.actionKey}(不在可选列表)`, selected: true }));
+        }
+      } else {
+        ctl = el("input", { type: "text", value: init?.actionKey ?? "", placeholder: "动作 key", spellcheck: false });
+      }
+      const count = el("input", { type: "number", className: "narrow", value: init?.count ?? 1, min: 1, step: 1 });
+      return {
+        node: el("div", { className: "row inline" }, ctl, el("span", { className: "hint", textContent: "次数" }), count),
+        read: () => {
+          const k = actions.length ? ctl.value : ctl.value.trim();
+          if (!k) return null;
+          const n = Number(count.value);
+          return { actionKey: k, count: Number.isInteger(n) && n > 0 ? n : 1 };
+        }
+      };
+    },
+    { hint: "结算完继续排产的动作。不加就只结算不排队", addText: "添加动作" }
+  );
+
+  const readEnqueue = () => {
+    const out = {};
+    for (const row of enqueue.read()) out[row.actionKey] = row.count;
+    return out;
+  };
+
+  return {
+    node: el("div", { className: "op-form" }, prof.node, enqueue.node),
+    read: () => ({ professionKey: prof.read(), enqueue: readEnqueue() }),
+    toRules: () => ({ profession: { professionKey: prof.read(), enqueue: readEnqueue() } })
+  };
+}
+
+function panelGuild(r, opts) {
+  const items = opts?.donatableItems ?? [];
+  const dividend = fBool("领公会分红", r.guild?.claimDividend, "游戏要求当日先完成捐献才能领");
+  const donate = fRows("捐献", r.guild?.donate ?? [], (init) => itemRow(init, { placeholder: "物品 key", items }), {
+    hint: "按物品选,运行时自动换成背包里的实例 ID",
+    addText: "添加捐献物品"
+  });
+  const redeem = fRows("兑换", r.guild?.redeem ?? [], (init) => itemRow(init, { placeholder: "商店物品 key" }), {
+    hint: "公会商店的物品 key,与捐献不是同一套",
+    addText: "添加兑换物品"
+  });
+  const payload = () => ({ claimDividend: dividend.read(), donate: donate.read(), redeem: redeem.read() });
+  return {
+    node: el("div", { className: "op-form" }, dividend.node, donate.node, redeem.node),
+    read: payload,
+    toRules: () => ({ guild: payload() })
+  };
+}
+
+// 地图/个人首领。后端 boss.map 收的是 {rules:{...}} 整块覆盖,故这里的键名要与规则一致。
+function panelBossMap(r, opts) {
+  const bosses = opts?.bosses ?? [];
+  const free = opts?.freeAttemptsLeft;
+  const difficulty = fDifficulty(r.boss?.difficulty, opts?.difficulties);
+  const mapBosses = fBossList("地图首领", r.boss?.mapBosses, bosses.filter((b) => b.type === "map"), { allowAll: true });
+  const challengePersonal = fBool("挑战个人首领", r.boss?.challengePersonal, "关闭时完全不碰个人首领");
+  const personalBosses = fBossList("个人首领", r.boss?.personalBosses, bosses.filter((b) => b.type === "personal"), {
+    hint: "一个都不勾就一个都不打" + (typeof free === "number" ? `。当前剩余免费次数 ${free}` : "")
+  });
+  const useTickets = fBool("允许消耗首领门票", r.boss?.useTickets, "免费次数用尽后服务端会自动扣票;关闭则次数用尽就停手");
+  const requireWin = fBool("只在预测会赢时挑战", r.boss?.requirePredictedWin, "挑战前先调预览,预测会输就跳过");
+  const minWin = fNum("最低胜率(%)", r.boss?.minWinChance, { min: 0, max: 100, hint: "0 = 不看胜率", required: true });
+  const maxRun = fNum("本次最多挑战次数", r.boss?.maxChallengesPerRun, { min: 1, max: 50, required: true });
+
+  const fields = [difficulty, mapBosses, challengePersonal, personalBosses, useTickets, requireWin, minWin, maxRun];
+  const payload = () => {
+    const out = {
+      difficulty: difficulty.read(),
+      mapBosses: mapBosses.read(),
+      challengePersonal: challengePersonal.read(),
+      personalBosses: personalBosses.read(),
+      useTickets: useTickets.read(),
+      requirePredictedWin: requireWin.read()
+    };
+    const mw = minWin.read();
+    const mx = maxRun.read();
+    if (mw !== null) out.minWinChance = mw;
+    if (mx !== null) out.maxChallengesPerRun = mx;
+    return out;
+  };
+  return {
+    node: el("div", { className: "op-form" }, ...fields.map((f) => f.node)),
+    // 整块覆盖:面板里取消勾选必须能生效,逐字段兜底会让取消永远无效
+    read: () => ({ rules: payload() }),
+    toRules: () => ({ boss: payload() })
+  };
+}
+
+function panelBossWorld(r, opts) {
+  const difficulty = fDifficulty(r.boss?.difficulty, opts?.difficulties);
+  const requireWin = fBool("只在预测会赢时挑战", r.boss?.requirePredictedWin);
+  const minWin = fNum("最低胜率(%)", r.boss?.minWinChance, { min: 0, max: 100, hint: "0 = 不看胜率", required: true });
+  const assist = fBool("只协助不主攻", false, "只往别人开的世界首领上打协助,不自己开");
+  const payload = () => {
+    const out = { difficulty: difficulty.read(), requirePredictedWin: requireWin.read() };
+    const mw = minWin.read();
+    if (mw !== null) out.minWinChance = mw;
+    return out;
+  };
+  return {
+    node: el(
+      "div",
+      { className: "op-form" },
+      el("p", { className: "hint", textContent: "世界首领只在开放时间窗内可打,时间窗在「通用设置」里配。" }),
+      difficulty.node,
+      requireWin.node,
+      minWin.node,
+      assist.node
+    ),
+    read: () => ({ rules: payload(), assistOnly: assist.read() }),
+    toRules: () => ({ boss: payload() })
+  };
+}
+
+function panelActivity(r) {
+  const boxes = [
+    ["quests", fBool("任务奖励", r.activity?.quests)],
+    ["achievements", fBool("成就奖励", r.activity?.achievements)],
+    ["daily", fBool("每日活跃", r.activity?.daily)],
+    ["signIn", fBool("每日签到", r.activity?.signIn)],
+    ["mail", fBool("邮件", r.activity?.mail)],
+    ["codex", fBool("图鉴奖励", r.activity?.codex === true)]
+  ];
+  const payload = () => {
+    const out = {};
+    for (const [k, f] of boxes) out[k] = f.read();
+    return out;
+  };
+  return {
+    node: el("div", { className: "op-form" }, ...boxes.map(([, f]) => f.node)),
+    read: payload,
+    toRules: () => ({ activity: payload() })
+  };
+}
+
+const PANELS = {
+  inventory: panelInventory,
+  profession: panelProfession,
+  guild: panelGuild,
+  bossMap: panelBossMap,
+  bossWorld: panelBossWorld,
+  activity: panelActivity
+};
+
+// 通用设置:只留跨操作共享的东西 —— 开关、间隔、时间窗。
+// 各操作自己的参数已经搬到对应面板,这里不再重复一遍。
+function rulesForm(r) {
   const sections = [
     section("挂机收益", [
-      ["enabled", fBool("启用", r.collect?.enabled)],
-      ["intervalHours", fNum("间隔(小时)", r.collect?.intervalHours, { min: 1, max: 24, hint: "收益上限 12 小时,建议 11" })]
+      ["enabled", fBool("排程执行", r.collect?.enabled)],
+      ["intervalHours", fNum("间隔(小时)", r.collect?.intervalHours, { min: 1, max: 24, hint: "收益上限 12 小时,建议 11", required: true })]
     ]),
     section("背包分解", [
-      ["enabled", fBool("启用", r.inventory?.enabled)],
-      [
-        "mode",
-        fSelect("模式", r.inventory?.mode, [["auto", "auto — 用游戏自带的自动分解规则"], ["explicit", "explicit — 按本地条件挑选"]], "auto 最安全,不会误拆")
-      ],
-      ["intervalHours", fNum("间隔(小时)", r.inventory?.intervalHours, { min: 1, max: 24 })]
+      ["enabled", fBool("排程执行", r.inventory?.enabled)],
+      ["intervalHours", fNum("间隔(小时)", r.inventory?.intervalHours, { min: 1, max: 24, required: true })]
     ]),
     section("副职", [
-      ["enabled", fBool("启用", r.profession?.enabled)],
-      ["professionKey", fSelect("副职", r.profession?.professionKey, [["", "不切换"], ...(opts?.professions ?? [])], "留「不切换」则沿用游戏内当前副职")],
-      ["intervalHours", fNum("间隔(小时)", r.profession?.intervalHours, { min: 1, max: 24 })]
+      ["enabled", fBool("排程执行", r.profession?.enabled)],
+      ["intervalHours", fNum("间隔(小时)", r.profession?.intervalHours, { min: 1, max: 24, required: true })]
     ]),
     section("公会", [
-      ["enabled", fBool("启用", r.guild?.enabled)],
-      ["claimDividend", fBool("领公会分红", r.guild?.claimDividend, "游戏要求当日先完成捐献才能领,下面不配捐献就领不到")],
-      [
-        "donate",
-        fRows("捐献", r.guild?.donate ?? [], (init) => itemRow(init, { placeholder: "物品 key", items }), {
-          hint: "按物品选,运行时自动换成背包里的实例 ID",
-          addText: "添加捐献物品"
-        })
-      ],
-      [
-        "redeem",
-        fRows("兑换", r.guild?.redeem ?? [], (init) => itemRow(init, { placeholder: "商店物品 key" }), {
-          hint: "公会商店的物品 key,与捐献不是同一套",
-          addText: "添加兑换物品"
-        })
-      ],
-      ["intervalHours", fNum("间隔(小时)", r.guild?.intervalHours, { min: 1, max: 48 })]
+      ["enabled", fBool("排程执行", r.guild?.enabled)],
+      ["intervalHours", fNum("间隔(小时)", r.guild?.intervalHours, { min: 1, max: 48, required: true })]
     ]),
     section("首领", [
-      ["enabled", fBool("启用", r.boss?.enabled)],
-      ["difficulty", fDifficulty(r.boss?.difficulty, opts?.difficulties)],
-      ["mapBosses", fBossList("地图首领", r.boss?.mapBosses, mapRows, { allowAll: true })],
-      [
-        "challengePersonal",
-        fBool("挑战个人首领", r.boss?.challengePersonal, "关闭时完全不碰个人首领。开启后仍只打下面勾选的")
-      ],
-      [
-        "personalBosses",
-        fBossList("个人首领", r.boss?.personalBosses, personalRows, {
-          hint: "一个都不勾就一个都不打" + (typeof free === "number" ? `。当前剩余免费次数 ${free}` : "")
-        })
-      ],
-      [
-        "useTickets",
-        fBool("允许消耗首领门票", r.boss?.useTickets, "接口没有门票开关,免费次数用尽后服务端会自动扣票。关闭时本程序在免费次数用尽后就不再挑战")
-      ],
-      [
-        "requirePredictedWin",
-        fBool("只在预测会赢时挑战", r.boss?.requirePredictedWin, "挑战前先调预览,预测会输就跳过")
-      ],
-      ["minWinChance", fNum("最低胜率(%)", r.boss?.minWinChance, { min: 0, max: 100, hint: "0 = 不看胜率。预览拿不到胜率时按不达标跳过" })],
-      ["maxChallengesPerRun", fNum("每轮最多挑战次数", r.boss?.maxChallengesPerRun, { min: 1, max: 50 })],
-      ["mapIntervalHours", fNum("地图首领间隔(小时)", r.boss?.mapIntervalHours, { min: 1, max: 24 })],
+      ["enabled", fBool("排程执行", r.boss?.enabled)],
+      ["mapIntervalHours", fNum("地图首领间隔(小时)", r.boss?.mapIntervalHours, { min: 1, max: 24, required: true })],
       [
         "worldWindows",
         fRows(
@@ -453,24 +711,28 @@ function rulesForm(r, opts) {
               read: () => (start.value && end.value ? { start: start.value, end: end.value } : null)
             };
           },
-          { addText: "添加时间窗" }
+          { addText: "添加时间窗", hint: "一个都不加就不打世界首领" }
         )
       ]
     ]),
     section("活动奖励", [
-      ["enabled", fBool("启用", r.activity?.enabled)],
-      ["quests", fBool("任务", r.activity?.quests)],
-      ["achievements", fBool("成就", r.activity?.achievements)],
-      ["daily", fBool("每日", r.activity?.daily)],
-      ["signIn", fBool("签到", r.activity?.signIn)],
-      ["mail", fBool("邮件", r.activity?.mail)],
+      ["enabled", fBool("排程执行", r.activity?.enabled)],
       ["dailyAt", fTime("每天领取时刻", r.activity?.dailyAt, "服务时区 Asia/Shanghai")]
     ])
   ];
 
   const keys = ["collect", "inventory", "profession", "guild", "boss", "activity"];
   return {
-    node: el("div", { className: "rule-form" }, ...sections.map((s) => s.node)),
+    node: el(
+      "div",
+      { className: "rule-form" },
+      el("p", {
+        className: "hint",
+        textContent:
+          "这里只管「排程什么时候跑」。每个操作具体打哪个首领、拆什么装备,在上面对应的操作面板里配,配好点「存为规则」即为排程所用。"
+      }),
+      ...sections.map((s) => s.node)
+    ),
     read: () => {
       const out = {};
       sections.forEach((s, i) => {
@@ -482,75 +744,182 @@ function rulesForm(r, opts) {
 }
 
 function accountCard(acc) {
-  const out = el("pre", { className: "out", hidden: true });
+  // div 而非 pre:日志由 PGLog 渲染成分行元素,pre 会把缩进样式搅乱
+  const out = el("div", { className: "out", hidden: true });
 
-  const run = async (path, label, extra) => {
+  const say = (text) => {
     out.hidden = false;
-    out.textContent = `${label} 执行中…`;
-    const data = await guarded(() =>
-      api("POST", `/accounts/${encodeURIComponent(acc.label)}/${path}`, { body: extra ?? {} })
-    );
-    // 这里不重载列表:重载会重建卡片,把刚拿到的结果冲掉
-    if (data !== undefined) out.textContent = `${label} 完成\n${JSON.stringify(data, null, 2)}`;
+    out.textContent = text;
   };
 
-  const actionButtons = ACTIONS.map(([path, label]) =>
-    el("button", {
-      className: path === "daily-run" ? "small" : "small ghost",
-      textContent: label,
-      onclick: () => run(path, label)
-    })
-  );
-  // 分解与首领支持 dryRun,给个只预览的入口,免得手滑把装备分解掉
-  actionButtons.push(
-    el("button", {
-      className: "small ghost",
-      textContent: "分解预览",
-      onclick: () => run("inventory/decompose", "分解预览", { dryRun: true })
-    }),
-    el("button", {
-      className: "small ghost",
-      textContent: "首领预览",
-      onclick: () => run("boss/map", "首领预览", { dryRun: true })
-    })
-  );
+  const run = async (act, extra, tag) => {
+    say(`${tag ?? act.label} 执行中…`);
+    const data = await guarded(() =>
+      api("POST", `/accounts/${encodeURIComponent(acc.label)}/${act.path}`, { body: extra ?? {} })
+    );
+    // 这里不重载列表:重载会重建卡片,把刚拿到的结果冲掉
+    if (data === undefined) return;
+    // renderInto 会清空宿主,所以给它一个专属容器,标题另放
+    const logHost = el("div", {});
+    out.textContent = "";
+    out.append(el("p", { className: "out-head", textContent: `${tag ?? act.label} 完成` }), logHost);
+    PGLog.renderInto(logHost, data, act.job);
+  };
 
-  // 规则设置。展开时才去游戏取首领/背包列表 —— 那要真登录,不该在列表渲染时就打。
-  const effective = mergeRules(structuredClone(defaultRules), acc.rules ?? undefined);
-  const rulesHost = el("div", { className: "rule-host" }, el("p", { className: "hint", textContent: "展开后从游戏读取首领与背包列表…" }));
+  // 选项(首领/背包/副职列表)要真登录才拿得到,只在第一次展开面板时取,之后复用。
+  let optsPromise = null;
+  const getOptions = () => {
+    if (!optsPromise) {
+      optsPromise = guarded(() => api("GET", `/accounts/${encodeURIComponent(acc.label)}/options`)).then((v) => {
+        if (v === undefined) optsPromise = null; // 失败不缓存,下次展开可重试
+        return v;
+      });
+    }
+    return optsPromise;
+  };
+
+  // 规则的三份表示要一起动:落库值、合上默认值后的生效值、高级 JSON 文本框。
+  // 只改其中一份会让「面板存规则」之后再存通用设置时把面板的改动顶回去。
+  let stored = acc.rules ?? {};
+  let effective = mergeRules(structuredClone(defaultRules), acc.rules ?? undefined);
+  const advanced = el("textarea", { value: JSON.stringify(stored, null, 2), spellcheck: false });
+  const applyRules = (next) => {
+    stored = next;
+    acc.rules = next;
+    effective = mergeRules(structuredClone(defaultRules), next);
+    advanced.value = JSON.stringify(next, null, 2);
+  };
+
+  // ---- 操作面板:点按钮只展开,执行一律走面板里的「确定执行」----
+  const panelHost = el("div", { className: "op-panel", hidden: true });
+  let openPath = null;
+
+  const btnClass = (path, active) =>
+    (path === "daily-run" ? "small" : "small ghost") + (active ? " active" : "");
+
+  const closePanel = () => {
+    openPath = null;
+    panelHost.hidden = true;
+    panelHost.textContent = "";
+    for (const b of actionButtons) b.className = btnClass(b.dataset.path, false);
+  };
+
+  const openPanel = async (act) => {
+    if (openPath === act.path) {
+      closePanel();
+      return;
+    }
+    openPath = act.path;
+    panelHost.hidden = false;
+    panelHost.textContent = "";
+    for (const b of actionButtons) b.className = btnClass(b.dataset.path, b.dataset.path === act.path);
+
+    const head = el("div", { className: "op-head" }, el("strong", { textContent: act.label }));
+    const body = el("div", { className: "op-body" });
+    const footer = el("div", { className: "row op-footer" });
+    panelHost.append(head, body, footer);
+
+    let panel = null;
+    if (act.panel) {
+      body.append(el("p", { className: "hint", textContent: "正在从游戏读取可选项…" }));
+      const opts = await getOptions();
+      if (openPath !== act.path) return; // 等待期间用户换了面板
+      body.textContent = "";
+      if (!opts) {
+        body.append(el("p", { className: "warn", textContent: "没能从游戏读取可选项,列表类字段只能手填。" }));
+      } else if (opts.errors?.length) {
+        body.append(el("p", { className: "warn", textContent: `部分选项读取失败:${opts.errors.join("; ")}` }));
+      }
+      panel = PANELS[act.panel](effective, opts ?? {});
+      body.append(panel.node);
+    } else {
+      body.append(el("p", { className: "hint", textContent: act.note ?? "该操作没有可调参数。" }));
+    }
+
+    const fire = async (dryRun) => {
+      const bad = panel?.validate?.();
+      if (bad) {
+        toast(bad, true);
+        return;
+      }
+      const args = panel ? panel.read() : {};
+      if (dryRun) args.dryRun = true;
+      await run(act, args, dryRun ? `${act.label}(只预览)` : act.label);
+    };
+
+    footer.append(
+      el("button", { className: "small", textContent: "确定执行", onclick: () => fire(false) })
+    );
+    if (act.preview) {
+      footer.append(
+        el("button", {
+          className: "small ghost",
+          textContent: "只预览",
+          onclick: () => fire(true)
+        })
+      );
+    }
+    if (panel?.toRules) {
+      footer.append(
+        el("button", {
+          className: "small ghost",
+          textContent: "存为规则",
+          onclick: async () => {
+            const bad = panel.validate?.();
+            if (bad) {
+              toast(bad, true);
+              return;
+            }
+            // PUT 是整体替换,先与本卡片已知的规则合并,免得存一个面板把别的清空
+            const merged = mergeRules(structuredClone(effective), panel.toRules());
+            const done = await guarded(() =>
+              api("PUT", `/accounts/${encodeURIComponent(acc.label)}/rules`, { body: { rules: merged } })
+            );
+            if (done !== undefined) {
+              applyRules(merged);
+              toast(`${act.label} 的设置已存为规则,排程下一轮生效`);
+            }
+          }
+        })
+      );
+    }
+    footer.append(el("button", { className: "small ghost", textContent: "收起", onclick: closePanel }));
+  };
+
+  const actionButtons = ACTIONS.map((act) => {
+    const b = el("button", {
+      className: btnClass(act.path, false),
+      textContent: act.label,
+      onclick: () => openPanel(act)
+    });
+    b.dataset.path = act.path;
+    return b;
+  });
+  const rulesHost = el("div", { className: "rule-host" });
   const rulesFooter = el("div", { className: "row" });
   let loaded = false;
 
-  const advanced = el("textarea", { value: JSON.stringify(acc.rules ?? {}, null, 2), spellcheck: false });
   const advancedBox = el(
     "details",
     { className: "advanced" },
     el("summary", { textContent: "高级:直接编辑 JSON" }),
-    el("p", { className: "hint", textContent: "只有上面表单覆盖不到的字段才需要动这里。保存时会与表单结果深合并,表单优先。" }),
+    el("p", { className: "hint", textContent: "表单与操作面板覆盖不到的字段才需要动这里。保存时会与表单结果深合并,表单优先。" }),
     advanced
   );
 
-  const buildRulesForm = async () => {
+  // 只管排程,不需要游戏侧的可选项,展开即可渲染,不打游戏接口。
+  const buildRulesForm = () => {
     if (loaded) return;
     loaded = true;
-    const opts = await guarded(() => api("GET", `/accounts/${encodeURIComponent(acc.label)}/options`));
-    // 取不到就用空选项渲染:表单仍可用,首领只能靠高级 JSON 填
-    const form = rulesForm(effective, opts ?? {});
+    const form = rulesForm(effective);
     rulesHost.textContent = "";
-    if (!opts) {
-      rulesHost.append(
-        el("p", { className: "warn", textContent: "没能从游戏读取可选项,首领与物品需在「高级」里手填。" })
-      );
-    } else if (opts.errors?.length) {
-      rulesHost.append(el("p", { className: "warn", textContent: `部分选项读取失败:${opts.errors.join("; ")}` }));
-    }
     rulesHost.append(form.node, advancedBox);
 
     rulesFooter.textContent = "";
     rulesFooter.append(
       el("button", {
         className: "small",
-        textContent: "保存规则",
+        textContent: "保存通用设置",
         onclick: async () => {
           let extra = {};
           try {
@@ -559,11 +928,15 @@ function accountCard(acc) {
             toast("「高级」里的 JSON 不合法,请修正后再保存", true);
             return;
           }
-          const rules = mergeRules(extra, form.read());
+          // PUT 整体替换,所以底子必须是当前生效值,否则会把各面板存过的设置清空
+          const rules = mergeRules(mergeRules(structuredClone(effective), extra), form.read());
           const done = await guarded(() =>
             api("PUT", `/accounts/${encodeURIComponent(acc.label)}/rules`, { body: { rules } })
           );
-          if (done !== undefined) toast("规则已保存,下一轮排程生效");
+          if (done !== undefined) {
+            applyRules(rules);
+            toast("通用设置已保存,下一轮排程生效");
+          }
         }
       })
     );
@@ -585,10 +958,17 @@ function accountCard(acc) {
     className: "small ghost",
     textContent: "验证登录",
     onclick: async () => {
-      out.hidden = false;
-      out.textContent = "正在向游戏服务端登录…";
+      say("正在向游戏服务端登录…");
       const data = await guarded(() => api("POST", `/accounts/${encodeURIComponent(acc.label)}/verify`, { body: {} }));
-      if (data !== undefined) out.textContent = `验证结果\n${JSON.stringify(data, null, 2)}`;
+      if (data === undefined) return; // guarded 已经弹过错误提示
+      out.textContent = "";
+      // 后端 verify 只回 {authed}。登录失败会走异常,到不了这里。
+      out.append(
+        el("p", {
+          className: data?.authed ? "out-head" : "warn",
+          textContent: data?.authed ? "登录成功,凭据可用。" : "服务端没确认登录状态,建议看任务记录里的错误。"
+        })
+      );
     }
   });
 
@@ -632,6 +1012,7 @@ function accountCard(acc) {
     ),
     el("p", { className: "meta", textContent: meta }),
     el("div", { className: "row actions" }, actionButtons),
+    panelHost,
     (() => {
       const box = el(
         "details",
@@ -713,20 +1094,41 @@ async function loadTasks() {
     return;
   }
 
-  const rows = runs.map((r) =>
-    el(
+  const STATUS_WORD = { ok: "成功", error: "失败", running: "执行中" };
+
+  // 结果列:一行中文摘要;点开才展开完整日志,免得列表被撑爆
+  const rows = [];
+  for (const r of runs) {
+    let result = null;
+    try {
+      result = r.result_json ? JSON.parse(r.result_json) : null;
+    } catch {
+      result = null; // 落库文本坏了就当没有,不影响整表渲染
+    }
+    const tr = el(
       "tr",
       {},
       el("td", { textContent: labels.get(r.account_id) ?? r.account_id }),
-      el("td", { textContent: r.job_key }),
+      el("td", { textContent: PGLog.label(r.job_key) }),
       el("td", {
         className: r.status === "ok" ? "status-ok" : r.status === "error" ? "status-bad" : "",
-        textContent: r.status
+        textContent: STATUS_WORD[r.status] ?? r.status
       }),
       el("td", { textContent: new Date(r.started_at).toLocaleString("zh-CN") }),
-      el("td", { textContent: r.error ?? "" })
-    )
-  );
+      el("td", { className: "cell-result", textContent: result ? PGLog.oneLine(result, r.job_key) : r.error ? "" : "没有结果记录" }),
+      el("td", { className: "cell-error", textContent: r.error ?? "" })
+    );
+    rows.push(tr);
+    if (result) {
+      const host = el("div", {});
+      const det = el("details", { className: "run-detail" }, el("summary", { textContent: "展开日志" }), host);
+      const detailRow = el("tr", { className: "detail-row" }, el("td", { colSpan: 6 }, det));
+      det.addEventListener("toggle", () => {
+        if (det.open && !host.children.length) PGLog.renderInto(host, result, r.job_key);
+      });
+      rows.push(detailRow);
+    }
+  }
 
   box.append(
     el(
@@ -738,7 +1140,7 @@ async function loadTasks() {
         el(
           "tr",
           {},
-          ...["账号", "任务", "状态", "开始时间", "错误"].map((h) => el("th", { textContent: h }))
+          ...["账号", "任务", "状态", "开始时间", "结果", "错误"].map((h) => el("th", { textContent: h }))
         )
       ),
       el("tbody", {}, rows)

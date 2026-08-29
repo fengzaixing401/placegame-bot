@@ -279,18 +279,74 @@ td.status-bad { color: var(--danger); }
 
 .toast.bad { border-color: #4a2f2f; color: #f0b0b0; }
 
-pre.out {
+.out {
   background: #12141a;
   border: 1px solid var(--line);
   border-radius: 6px;
   padding: 10px;
   margin: 10px 0 0;
-  font-size: 12px;
-  max-height: 260px;
+  font-size: 13px;
+  max-height: 420px;
+  overflow: auto;
+  word-break: break-word;
+}
+
+.out-head { margin: 0 0 6px; font-weight: 600; font-size: 13px; }
+
+/* 执行日志:一行一条,靠颜色区分战果、失败与提示 */
+.log { display: flex; flex-direction: column; gap: 2px; }
+.log-line { line-height: 1.65; white-space: pre-wrap; }
+.log-head { color: var(--muted); font-size: 12px; }
+.log-ok { color: var(--ok); }
+.log-bad { color: var(--danger); }
+.log-warn { color: #d9a441; }
+.log-muted { color: var(--muted); }
+
+.log-raw { margin-top: 8px; }
+.log-raw summary { cursor: pointer; color: var(--muted); font-size: 12px; }
+.log-raw pre {
+  margin: 6px 0 0;
+  font-size: 11px;
+  max-height: 240px;
   overflow: auto;
   white-space: pre-wrap;
   word-break: break-word;
+  color: var(--muted);
 }
+
+/* 操作面板:点操作按钮展开,执行要面板里的「确定执行」 */
+.op-panel {
+  margin-top: 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 12px;
+  background: #12141a;
+}
+.op-head { margin-bottom: 10px; font-size: 13px; }
+.op-body { display: flex; flex-direction: column; gap: 10px; }
+.op-form { display: flex; flex-direction: column; gap: 10px; }
+.op-footer { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line); }
+button.active { border-color: var(--accent); color: var(--fg); }
+
+.checklist.wrap {
+  flex-direction: row;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  max-height: 180px;
+}
+.check-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  padding: 2px 0;
+  font-size: 13px;
+}
+
+td.cell-result { color: var(--fg); }
+td.cell-error { color: var(--danger); }
+tr.detail-row > td { padding-top: 0; }
+.run-detail summary { cursor: pointer; color: var(--muted); font-size: 12px; }
 
 @media (max-width: 560px) {
   main { padding: 14px; }
