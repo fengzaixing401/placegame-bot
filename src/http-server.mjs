@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { publicView } from "./accounts/store.mjs";
 import { generateToken } from "./settings.mjs";
+import { browserScript } from "./labels.mjs";
 
 const MAX_BODY_BYTES = 256 * 1024;
 const SESSION_COOKIE = "pg_session";
@@ -27,6 +28,12 @@ function loadWebAssets(logger) {
       logger.error(`[http] 静态资源 ${file} 读取失败,WebUI 将不可用:`, err.message);
     }
   }
+  // 枚举中文名表由 src/labels.mjs 生成,不另存一份前端副本 —— 两份手写表必然会漂移。
+  // 和其他静态资源一样只在启动时算一次。
+  map.set("/labels.js", {
+    body: Buffer.from(browserScript(), "utf8"),
+    contentType: "text/javascript; charset=utf-8"
+  });
   return map;
 }
 
@@ -194,6 +201,7 @@ export function createHttpServer({ config, service, store, settings, scheduler, 
   action("profession/settle", "profession", (b) => b);
   action("guild/daily", "guild", (b) => b);
   action("boss/map", "boss.map", (b) => b);
+  action("boss/personal", "boss.personal", (b) => b);
   action("boss/world", "boss.world", (b) => b);
   action("activity/claim-all", "activity", (b) => b);
   action("daily-run", "dailyRun", (b) => b);

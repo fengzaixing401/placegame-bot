@@ -33,11 +33,26 @@ function check(name, cond, detail = "") {
 const calls = [];
 // 可变状态:用例要分别覆盖"免费次数还有"与"免费次数用尽"两种门票场景
 let freeAttempts = 3;
-// 世界首领状态同样要能切:窗口内(active)与窗口外(closed)是两条分支
+// world-status 只是展示用的场次信息。协作闸门在首领行的 assistBlockedReason /
+// worldInstance 上,不在这个接口 —— 真号 7 个世界首领全是这样。
 let worldStatusRows = [
   { instanceId: "wb_boss_w_fixed_20", bossKey: "boss_w", status: "active",
     maxHp: 1000, currentHp: 900, hpPercent: 90, participantCount: 12, maxAttemptCount: 3 }
 ];
+// 世界首领行的协作闸门,用例要分别覆盖"可协作"与"场次已结束"
+let worldAssistBlocked = "";
+
+// 难度档。真号每个首领都带 difficultyOptions 三档,门票消耗按类型分野:
+// 个人首领三档全 0(扣的是 personalAttemptPool),地图/世界 普通 0 / 困难 1 / 噩梦 2。
+// 缺了这个字段,useTickets:false 时后端会按"读不到门票消耗"整批跳过 —— 那是刻意的保守行为。
+const diffs = (kind, chance = 95) => {
+  const tickets = kind === "personal" ? [0, 0, 0] : [0, 1, 2];
+  return [
+    { key: "normal", name: "普通", ticketCost: tickets[0], chance, predictedWin: chance >= 50 },
+    { key: "hard", name: "困难", ticketCost: tickets[1], chance, predictedWin: chance >= 50 },
+    { key: "nightmare", name: "噩梦", ticketCost: tickets[2], chance, predictedWin: chance >= 50 }
+  ];
+};
 function fakeFetch(url, opts = {}) {
   const path = new URL(url).pathname;
   const body = opts.body ? JSON.parse(opts.body) : null;
@@ -67,19 +82,31 @@ function fakeFetch(url, opts = {}) {
     case "/api/client/dynamic-view":
       return reply({
         maps: [{ key: "map_1", name: "森林", current: true }],
+        // 字段照真号形状造:可挑战 = blockedReason 为空串;顶层没有 available,
+        // 也没有 remainingAttemptCount(21 个首领的字段全集里都没有这两个)。
         bosses: [
-          { key: "boss_map_1", type: "map", name: "地图首领", available: true, remainingAttemptCount: 2 },
-          { key: "boss_map_2", type: "map", name: "次数用尽", available: true, remainingAttemptCount: 0 },
-          { key: "boss_map_3", type: "map", name: "被封锁", available: false, blockedReason: "等级不足" },
-          // 真实服务端用空字符串表示"无阻挡原因",仍必须被 available:false 挡住
-          { key: "boss_map_4", type: "map", name: "封锁但无原因", available: false, blockedReason: "" },
-          // 可挑战但预览胜率不足,用来验证胜率闸门确实会拦
-          { key: "boss_low", type: "map", name: "胜率不足", available: true, remainingAttemptCount: 1 },
-          // 个人首领:默认必须完全不碰(野猪王回归用例)
-          { key: "boss_pig", type: "personal", name: "野猪王", available: true, remainingAttemptCount: 3 },
-          { key: "boss_w", type: "world", name: "世界首领", available: true }
+          { key: "boss_map_1", type: "map", name: "地图首领", blockedReason: "", difficultyOptions: diffs("map") },
+          { key: "boss_map_2", type: "map", name: "次数用尽", blockedReason: "", difficultyOptions: diffs("map") },
+          { key: "boss_map_3", type: "map", name: "被封锁", blockedReason: "等级不足", difficultyOptions: diffs("map") },
+          // 困难档单独封锁(材料不够),行级却是放行的 —— 只看行级会漏掉这种
+          { key: "boss_map_4", type: "map", name: "困难档材料不够", blockedReason: "",
+            difficultyOptions: [
+              { key: "normal", name: "普通", ticketCost: 0, chance: 95, predictedWin: true },
+              { key: "hard", name: "困难", ticketCost: 1, chance: 95, predictedWin: true, blockedReason: "解毒草不足" },
+              { key: "nightmare", name: "噩梦", ticketCost: 2, chance: 95, predictedWin: true }
+            ] },
+          // 可挑战但胜率不足,用来验证胜率闸门确实会拦
+          { key: "boss_low", type: "map", name: "胜率不足", blockedReason: "", difficultyOptions: diffs("map", 30) },
+          // 个人首领:默认必须完全不碰(野猪王回归用例)。免费次数在行级 personalAttemptPool 上
+          { key: "boss_pig", type: "personal", name: "野猪王", blockedReason: "",
+            difficultyOptions: diffs("personal"),
+            personalAttemptPool: { freeRemaining: freeAttempts, freeLimit: 5, ticketUsed: 0, ticketLimit: 5, nextTicketCost: 0 } },
+          { key: "boss_w", type: "world", name: "世界首领", blockedReason: "",
+            difficultyOptions: diffs("world"),
+            assistBlockedReason: worldAssistBlocked,
+            worldInstance: { instanceId: "wb_boss_w_fixed_20", bossKey: "boss_w", status: "active",
+              hpPercent: 90, participantCount: 12, remainingAttemptCount: 3 } }
         ],
-        personalBossAttempts: { freeRemaining: freeAttempts, ticketRemaining: 5 },
         quests: [
           { questKey: "q1", canClaim: true },
           { questKey: "q2", claimed: true },
@@ -292,10 +319,35 @@ check("公会 donate 用 itemId", g.donated[0]?.result?.donated === "i1");
 check("公会分红", g.dividend?.dividend === 500);
 
 const bm = await service.run("fzx401", (api, row) => actions["boss.map"](api, row));
-check("首领跳过次数用尽与被封锁", bm.attempted.length === 1 && bm.attempted[0].bossKey === "boss_map_1", JSON.stringify({ a: bm.attempted.map((x) => x.bossKey), s: bm.skipped.map((s) => s.reason) }));
-check("blockedReason 为空串也算阻挡", bm.skipped.some((s) => s.bossKey === "boss_map_4" && !!s.reason), JSON.stringify(bm.skipped));
-check("胜率不足被闸门拦下", bm.skipped.some((s) => s.bossKey === "boss_low" && /胜率|预测会输/.test(s.reason)), JSON.stringify(bm.skipped.filter((s) => s.bossKey === "boss_low")));
+const bmSkip = (key) => bm.skipped.find((s) => s.bossKey === key);
+// 普通档不扣门票,所以 useTickets:false 也能打;被拦的只该是行级封锁与胜率不足那两个
+check(
+  "只打得动的才打",
+  bm.attempted.length === 3 &&
+    ["boss_map_1", "boss_map_2", "boss_map_4"].every((k) => bm.attempted.some((x) => x.bossKey === k)),
+  JSON.stringify({ a: bm.attempted.map((x) => x.bossKey), s: bm.skipped.map((s) => `${s.bossKey}:${s.reason}`) })
+);
+// blockedReason 为空串是"可挑战"(真号 21 个首领全是空串),不能反过来当阻挡
+check("空串 blockedReason 不算阻挡", !bmSkip("boss_map_1") && !bmSkip("boss_map_4"), JSON.stringify(bm.skipped.map((s) => s.bossKey)));
+check("行级封锁被拦下", /等级不足/.test(bmSkip("boss_map_3")?.reason ?? ""), JSON.stringify(bmSkip("boss_map_3")));
+check("胜率不足被闸门拦下", /胜率|预测会输/.test(bmSkip("boss_low")?.reason ?? ""), JSON.stringify(bmSkip("boss_low")));
 check("挑战前先调 preview", calls.some((x) => x.path === "/api/boss/preview" && x.body?.bossKey === "boss_map_1"));
+
+// 难度档自带的封锁只在该档体现,行级是放行的 —— 选到那档才该被拦
+const bmHard = await service.run("fzx401", (api, row) => actions["boss.map"](api, row, { rules: { difficulty: "hard", useTickets: true } }));
+check(
+  "困难档材料不足只在该档被拦",
+  /解毒草不足/.test(bmHard.skipped.find((s) => s.bossKey === "boss_map_4")?.reason ?? ""),
+  JSON.stringify(bmHard.skipped.map((s) => `${s.bossKey}:${s.reason}`))
+);
+// 困难档要扣 1 张门票,禁用门票时必须整批停手(旧代码只查个人首领,这里门票照扣)
+const bmHardNoTicket = await service.run("fzx401", (api, row) => actions["boss.map"](api, row, { rules: { difficulty: "hard", useTickets: false } }));
+check(
+  "禁用门票时困难档一律不打",
+  bmHardNoTicket.attempted.length === 0 &&
+    bmHardNoTicket.skipped.some((s) => /要扣 1 张门票/.test(s.reason)),
+  JSON.stringify(bmHardNoTicket.skipped.map((s) => `${s.bossKey}:${s.reason}`))
+);
 check("难度写进输出", bm.difficulty === "normal", String(bm.difficulty));
 // 野猪王回归:默认配置下个人首领连候选都不该进,skipped 里也不该出现
 check(
@@ -305,15 +357,17 @@ check(
 );
 check("首领挑战后领奖", bm.claimed?.claimed === true);
 
-// 直接驱动 runBosses 覆盖个人首领的三档控制。基线取默认闸门值,只改要测的开关。
-const runBossRules = (over) =>
-  service.run("fzx401", (api) =>
-    bossFeature.runBosses(api, {
-      rules: { difficulty: "normal", minWinChance: 80, requirePredictedWin: true, ...over }
+// 走 boss.personal 动作而不是裸调 runBosses:类型闸门写在动作里(types: [personal]),
+// 绕过它就测不到"这个动作只碰个人首领"。个人首领读的是 personalDifficulty,不是 difficulty。
+// challengePersonal 只管要不要自动排程(见 scheduler.mjs),不拦手动执行,故这里不传。
+const runPersonal = (over) =>
+  service.run("fzx401", (api, row) =>
+    actions["boss.personal"](api, row, {
+      rules: { personalDifficulty: "normal", minWinChance: 80, requirePredictedWin: true, ...over }
     })
   );
 
-const bpOpen = await runBossRules({ challengePersonal: true, personalBosses: [] });
+const bpOpen = await runPersonal({ personalBosses: [] });
 check(
   "开了个人首领但未点名仍不打",
   !bpOpen.attempted.some((x) => x.bossKey === "boss_pig") &&
@@ -322,7 +376,7 @@ check(
 );
 
 freeAttempts = 0;
-const bpNoFree = await runBossRules({ challengePersonal: true, personalBosses: ["boss_pig"], useTickets: false });
+const bpNoFree = await runPersonal({ personalBosses: ["boss_pig"], useTickets: false });
 check(
   "免费次数用尽且禁用门票则不打",
   !bpNoFree.attempted.some((x) => x.bossKey === "boss_pig") &&
@@ -330,46 +384,47 @@ check(
   JSON.stringify({ free: bpNoFree.freeAttemptsLeft, s: bpNoFree.skipped })
 );
 
-const bpTicket = await runBossRules({ challengePersonal: true, personalBosses: ["boss_pig"], useTickets: true });
+const bpTicket = await runPersonal({ personalBosses: ["boss_pig"], useTickets: true });
 check("允许门票时才打", bpTicket.attempted.some((x) => x.bossKey === "boss_pig"), JSON.stringify(bpTicket.skipped));
 
 freeAttempts = 3;
-const bpFree = await runBossRules({ challengePersonal: true, personalBosses: ["boss_pig"], useTickets: false });
+const bpFree = await runPersonal({ personalBosses: ["boss_pig"], useTickets: false });
 check("免费次数够则正常打", bpFree.attempted.some((x) => x.bossKey === "boss_pig"), JSON.stringify(bpFree.skipped));
 
-// 世界首领:world-status 返回实例数组,早先按单对象读 status,这个「窗口外跳过」从来没生效过。
-// 跳过必须是"每项都明确 closed"才成立 —— 读不到状态或状态词没见过时照旧尝试,
-// 免得猜错状态词把整轮白白跳掉。
+// 世界首领:只参与协作讨伐 + 领奖,不主动挑战 —— 主攻会按困难/噩梦档扣门票,与本意相反。
+// 协作闸门在首领行的 assistBlockedReason / worldInstance 上,不在 world-status 接口。
+const callsBeforeOpen = calls.length;
 const wbOpen = await service.run("fzx401", (api, row) => actions["boss.world"](api, row));
+const wbOpenPaths = calls.slice(callsBeforeOpen).map((c) => c.path);
 check(
-  "窗口内不跳过,并记下中文名与胜负",
-  wbOpen.skipped === undefined &&
-    wbOpen.attempted.some((x) => x.bossKey === "boss_w" && x.name === "世界首领" && x.win === true),
-  JSON.stringify({ skipped: wbOpen.skipped, attempted: wbOpen.attempted.map((x) => ({ k: x.bossKey, n: x.name, w: x.win })) })
+  "可协作时走 assist 并记下中文名",
+  wbOpen.assisted.length === 1 &&
+    wbOpen.assisted[0].bossKey === "boss_w" &&
+    wbOpen.assisted[0].name === "世界首领" &&
+    wbOpen.skipped.length === 0,
+  JSON.stringify({ assisted: wbOpen.assisted, skipped: wbOpen.skipped })
 );
+check("世界首领不主动挑战也不调 preview", !wbOpenPaths.includes("/api/boss/challenge") && !wbOpenPaths.includes("/api/boss/preview"), JSON.stringify(wbOpenPaths));
+check("协作成功后领奖", wbOpen.claimed?.claimed === true, JSON.stringify(wbOpen.claimed));
+check("场次信息照原样带出供页面显示", Array.isArray(wbOpen.status) && wbOpen.status[0]?.status === "active", JSON.stringify(wbOpen.status));
 
-worldStatusRows = [{ instanceId: "wb_1", bossKey: "boss_w", status: "closed", hpPercent: 0 }];
-const callsBeforeClosed = calls.length;
-const wbClosed = await service.run("fzx401", (api, row) => actions["boss.world"](api, row));
+// 服务端给了协作阻挡原因就必须停手,且一次 assist 都不发
+worldAssistBlocked = "当前世界首领场次未开放或已经结束。";
+const callsBeforeBlocked = calls.length;
+const wbBlocked = await service.run("fzx401", (api, row) => actions["boss.world"](api, row));
 check(
-  "全部 closed 时跳过且不打接口",
-  wbClosed.skipped === "世界首领未开放" &&
-    !calls.slice(callsBeforeClosed).some((c) => c.path === "/api/boss/challenge" || c.path === "/api/boss/assist"),
-  JSON.stringify({ skipped: wbClosed.skipped, paths: calls.slice(callsBeforeClosed).map((c) => c.path) })
+  "被服务端拦下时不发 assist 也不领奖",
+  wbBlocked.assisted.length === 0 &&
+    /场次未开放或已经结束/.test(wbBlocked.skipped[0]?.reason ?? "") &&
+    wbBlocked.claimed === null &&
+    !calls.slice(callsBeforeBlocked).some((c) => c.path === "/api/boss/assist" || c.path === "/api/boss/claim-reward"),
+  JSON.stringify({ skipped: wbBlocked.skipped, paths: calls.slice(callsBeforeBlocked).map((c) => c.path) })
 );
+worldAssistBlocked = "";
 
-// 没见过的状态值不能当成"未开放":猜错状态词会让整轮静默空转
-worldStatusRows = [{ instanceId: "wb_1", bossKey: "boss_w", status: "cooldown" }];
-const wbUnknown = await service.run("fzx401", (api, row) => actions["boss.world"](api, row));
-check("状态值没见过仍照旧尝试", wbUnknown.skipped === undefined && wbUnknown.attempted.length === 1, JSON.stringify(wbUnknown.skipped));
-
-// 状态里只有一项 closed、另一项还开着,就不能算整体未开放
-worldStatusRows = [
-  { instanceId: "wb_1", bossKey: "boss_w", status: "closed" },
-  { instanceId: "wb_2", bossKey: "boss_w2", status: "active" }
-];
-const wbMixed = await service.run("fzx401", (api, row) => actions["boss.world"](api, row));
-check("只有部分 closed 不算未开放", wbMixed.skipped === undefined && wbMixed.attempted.length === 1, JSON.stringify(wbMixed.skipped));
+// 点了名就只协作名单里那几个
+const wbNamed = await service.run("fzx401", (api) => bossFeature.runWorldBoss(api, { rules: { worldBosses: ["别的首领"] } }));
+check("点名后不在名单里的不协作", wbNamed.assisted.length === 0 && wbNamed.skipped.length === 0, JSON.stringify(wbNamed.assisted));
 
 worldStatusRows = [
   { instanceId: "wb_boss_w_fixed_20", bossKey: "boss_w", status: "active",
@@ -468,7 +523,9 @@ check("未设密码时提示需初始化", sess0.json.data.needsSetup === true &
 check("ready 报令牌来源为 env", ready.json.data.apiTokenSource === "env" && ready.json.data.webPasswordSet === false);
 
 check("初始设置需令牌", (await call("POST", "/api/web/setup", { token: null, body: { password: WEB_PW } })).status === 401);
-check("初始设置拒短密码", (await call("POST", "/api/web/setup", { body: { password: "short" } })).status === 400);
+// 长度不设下限(用户要求可随意设置),但空密码仍必须拒 —— 那等于没有密码。
+// 短密码能不能设在下面用改密接口验(setup 只能成功一次)
+check("初始设置拒空密码", (await call("POST", "/api/web/setup", { body: { password: "" } })).status === 400);
 check("初始设置成功", (await call("POST", "/api/web/setup", { body: { password: WEB_PW } })).status === 200);
 check("重复初始设置 409", (await call("POST", "/api/web/setup", { body: { password: WEB_PW } })).status === 409);
 
@@ -557,6 +614,24 @@ check("其他会话被作废", (await call("GET", "/accounts", { token: null, co
 check("本会话仍有效", (await call("GET", "/accounts", { token: null, cookie })).status === 200);
 check("旧密码登录失败", (await call("POST", "/api/web/login", { token: null, ip: "10.0.0.12", body: { password: WEB_PW } })).status === 401);
 check("新密码登录成功", (await call("POST", "/api/web/login", { token: null, ip: "10.0.0.13", body: { password: NEW_PW } })).status === 200);
+
+// 密码长度不设下限(用户要求可随意设置),但空密码仍必须拒 —— 那等于没有密码。
+// 放在这里而不是 setup 段:setup 只能成功一次,改密可以反复调,能真正走通"设短密码再用它登录"。
+const SHORT_PW = "abc";
+check(
+  "改密拒空密码",
+  (await call("POST", "/api/web/password", { token: null, cookie, csrf, body: { currentPassword: NEW_PW, newPassword: "" } })).status === 400
+);
+check(
+  "短密码可以设",
+  (await call("POST", "/api/web/password", { token: null, cookie, csrf, body: { currentPassword: NEW_PW, newPassword: SHORT_PW } })).status === 200
+);
+check("短密码能登录", (await call("POST", "/api/web/login", { token: null, ip: "10.0.0.14", body: { password: SHORT_PW } })).status === 200);
+// 改回长密码,让后面"库中无明文密码"查的是当前生效的那个
+check(
+  "短密码可以改回",
+  (await call("POST", "/api/web/password", { token: null, cookie, csrf, body: { currentPassword: SHORT_PW, newPassword: NEW_PW } })).status === 200
+);
 
 // 登出后会话立即不可用
 await call("POST", "/api/web/logout", { token: null, cookie, csrf });

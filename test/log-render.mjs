@@ -5,6 +5,8 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import assert from "node:assert/strict";
+import vm from "node:vm";
+import { browserScript } from "../src/labels.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -25,11 +27,17 @@ function fakeDoc() {
 }
 
 export function loadPGLog() {
-  const src = readFileSync(join(ROOT, "src/web/log.js"), "utf8");
-  const sandbox = { window: {}, document: fakeDoc() };
-  // log.js 是普通脚本(非模块),用 Function 注入 window/document 即可
-  new Function("window", "document", src)(sandbox.window, sandbox.document);
-  return { PGLog: sandbox.window.PGLog, doc: sandbox.document };
+  // 用 vm 而不是 new Function:浏览器里 window 就是全局对象本身,所以 labels.js 的
+  // window.PGL=... 会落成真正的全局,log.js 里那些裸 PGL 才找得到。
+  // 拿普通对象当 window 传进 new Function 做不到这一点 —— PGL 仍未定义,
+  // 每个渲染器都掉进 catch,整份测试变成在断言"日志渲染出错"的措辞。
+  const context = vm.createContext({ document: fakeDoc() });
+  vm.runInContext("var window = globalThis;", context);
+  // 按 index.html 的顺序装:labels.js → log.js。
+  // 顺带把 browserScript() 纳入常规测试 —— 那段代码在模板字符串里,node --check 看不进去。
+  vm.runInContext(browserScript(), context);
+  vm.runInContext(readFileSync(join(ROOT, "src/web/log.js"), "utf8"), context);
+  return { PGLog: context.window.PGLog, PGL: context.window.PGL, doc: context.document };
 }
 
 const { PGLog, doc } = loadPGLog();
@@ -74,12 +82,18 @@ export const SAMPLES = {
     redeemed: [], donated: [], equipmentDonated: [], dividend: null, progress: [],
     errors: [{ step: "claimDividend", error: "今日完成捐献后才能领取公会分红。" }]
   },
+  // 形状对着真实 runBosses 的输出核过(用 _bosses.json 的 21 个真号首领行跑出来的):
+  // 顶层 attempted/claimed/difficulty/errors/freeAttemptsLeft/gate/personalDifficulty/skipped,
+  // attempted 行 bossKey/difficulty/dryRun/forecast/name/result/win,skipped 行 bossKey/difficulty/name/reason。
+  // freeAttemptsLeft 是快照里所有个人首领免费次数的最小值 —— 快照不按类型过滤,
+  // 所以打地图首领时它照样是个数字,不会是 null。
   "boss.map": {
     difficulty: "nightmare",
+    personalDifficulty: "normal",
     gate: { minWinChance: 80, requirePredictedWin: true, useTickets: true },
-    freeAttemptsLeft: null,
+    freeAttemptsLeft: 5,
     attempted: [{
-      bossKey: "nightmare_treant", name: "梦魇古树", dryRun: false, win: true,
+      bossKey: "nightmare_treant", name: "梦魇古树", difficulty: "nightmare", dryRun: false, win: true,
       forecast: { chance: 98, predictedWin: true },
       result: {
         player: { hp: 1, gold: 2 },
@@ -98,8 +112,8 @@ export const SAMPLES = {
       }
     }],
     skipped: [
-      { bossKey: "eclipse_king", name: "日蚀君王", reason: "预测会输", forecast: { chance: 12, predictedWin: false } },
-      { bossKey: "frostfire_king", name: "霜火君王", reason: "预测会输", forecast: { chance: 4, predictedWin: false } }
+      { bossKey: "eclipse_king", name: "日蚀君王", difficulty: "nightmare", reason: "预测会输", forecast: { chance: 12, predictedWin: false } },
+      { bossKey: "frostfire_king", name: "霜火君王", difficulty: "nightmare", reason: "预测会输", forecast: { chance: 4, predictedWin: false } }
     ],
     claimed: { claimed: false, message: "首领奖励在挑战胜利时即时发放。" },
     errors: [{ bossKey: "boar_king", name: "野猪王", error: "今日个人首领门票追加次数已用尽。" }]
@@ -158,9 +172,14 @@ check("inventory explicit 逐件给出拆与留的原因", () => {
   }, "inventory");
   assert.match(t, /仅预览,没有真的分解/);
   assert.match(t, /评分低于 3,000/);
-  assert.match(t, /将分解 精良短剑\(blue · 60 级 · 评分 1,200\)/);
+  // 品质一律显示游戏内档位名。条件行还要按档位从低到高排,不跟着入参顺序 ——
+  // 规则可能是 REST/agent 存进来的,顺序任意。
+  assert.match(t, /品质 优秀\/精良/);
+  assert.match(t, /将分解 精良短剑\(精良 · 60 级 · 评分 1,200\)/);
   assert.match(t, /传说龙纹刃.*极品词条/);
   assert.doesNotMatch(t, /极品 极品品/);
+  // 英文色名一个都不该露出来
+  assert.doesNotMatch(t, /blue|red|green/);
 });
 
 check("profession 用响应里的中文动作名,不用 key", () => {
@@ -172,13 +191,20 @@ check("profession 用响应里的中文动作名,不用 key", () => {
 
 check("boss 用游戏自己的 summary,不碰收件箱 notices", () => {
   const t = text(SAMPLES["boss.map"], "boss.map");
-  assert.match(t, /挑战 梦魇古树:胜利/);
+  assert.match(t, /挑战 梦魇古树\(噩梦\):胜利/);
   assert.match(t, /获得 经验 5760、传说毒牙刃 x1/);
   assert.match(t, /39 回合/);
   assert.match(t, /门票 2\(剩 4,256\)/);
   assert.match(t, /极品掉落 传说龙纹刃/);
   assert.match(t, /日蚀君王 —— 预测会输\(预测胜率 12%\)/);
   assert.match(t, /首领奖励在挑战胜利时即时发放。/);
+  // 免费次数只在读到数字时才渲染(log.js 只认 typeof number),样本从前是 null,
+  // 这一行一直没被任何测试走到过
+  assert.match(t, /剩余免费次数 5/);
+  // 难度记在每条结果上,且显示游戏内档位名 —— 个人与地图首领各有自己那档,
+  // 只在开头写一次会张冠李戴
+  assert.match(t, /噩梦/);
+  assert.doesNotMatch(t, /nightmare/);
   // 收件箱里别的动作产生的通知,绝不能算进这次战斗
   assert.doesNotMatch(t, /分解 21 件装备/);
   // 玩家整体快照不该出现
@@ -289,10 +315,15 @@ check("renderInto 把原始数据放进折叠区", () => {
 });
 
 check("一行摘要取战果而不是配置回显", () => {
-  // 列表里要看的是打赢没、分解了几件,不是用了什么难度
-  assert.match(PGLog.oneLine(SAMPLES["boss.map"], "boss.map"), /挑战 梦魇古树:胜利/);
+  // 列表里要看的是打赢没、分解了几件。跟着战果一起出的难度是这一场实际用的那档
+  // (记在结果行上),不是开头那行配置回显 —— 后者只在压根没战果时才兜底。
+  assert.match(PGLog.oneLine(SAMPLES["boss.map"], "boss.map"), /挑战 梦魇古树\(噩梦\):胜利/);
   assert.match(PGLog.oneLine(SAMPLES.inventory, "inventory"), /已分解装备 3 件/);
-  assert.equal(PGLog.label("boss.map"), "地图/个人首领");
+  // 三类首领三个动作三个名字:合成一个名字会让列表里分不出这条打的是哪类,
+  // 而个人首领次数有限,认错类型代价最大
+  assert.equal(PGLog.label("boss.personal"), "个人首领");
+  assert.equal(PGLog.label("boss.map"), "地图首领");
+  assert.equal(PGLog.label("boss.world"), "世界首领");
 });
 
 check("步骤名译成中文,不露 camelCase 键", () => {
@@ -305,7 +336,7 @@ check("步骤名译成中文,不露 camelCase 键", () => {
 check("dailyRun 逐段套用对应渲染器", () => {
   const t = text({ ran: { collect: SAMPLES.collect, "boss.map": SAMPLES["boss.map"] }, skipped: ["guild"], errors: [] }, "dailyRun");
   assert.match(t, /【收挂机收益】/);
-  assert.match(t, /【地图\/个人首领】/);
+  assert.match(t, /【地图首领】/);
   assert.match(t, /跳过:公会日常/);
 });
 

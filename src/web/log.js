@@ -160,13 +160,11 @@
     }
   };
 
-  // 装备一行式描述。品质保留游戏内部取值(red / orange / …):
-  // 只有 red=传说 在真号掉落里得到确认,其余没验证过,写成中文名等于骗人 ——
-  // 分解是不可逆操作,这里宁可丑一点也不能标错。
+  // 装备一行式描述。品质显示游戏内的中文档位名(映射表在 src/labels.mjs)。
   var eqName = function (r) {
     if (!r || typeof r !== "object") return String(r == null ? "未知装备" : r);
     var bits = [];
-    if (r.quality) bits.push(String(r.quality));
+    if (r.quality) bits.push(PGL.quality(r.quality));
     if (typeof r.level === "number") bits.push(r.level + " 级");
     if (typeof r.score === "number") bits.push("评分 " + N(r.score));
     // rareRank 的取值本身就是「极品」,别再加前缀凑成"极品 极品"
@@ -182,7 +180,10 @@
     if (typeof c.maxScore === "number") bits.push("评分低于 " + N(c.maxScore));
     if (typeof c.maxLevel === "number") bits.push("等级不高于 " + N(c.maxLevel));
     var q = asArr(c.qualities);
-    if (q.length) bits.push("品质 " + q.join("/"));
+    // 存的是内部值(white/red/…),显示成游戏内档位名并按档位排序
+    if (q.length) {
+      bits.push("品质 " + PGL.sortQualities(q).map(function (x) { return PGL.quality(x); }).join("/"));
+    }
     if (c.keepRareRank !== false) bits.push("保留极品词条");
     var ka = asArr(c.keepAttrs);
     if (ka.length) bits.push("命中 " + ka.join("/") + " 则保留");
@@ -360,8 +361,13 @@
       if (res.pauseReason) out.push(L("已暂停:" + res.pauseReason, "warn", 1));
     }
 
+    // select 响应不一定带中文名,而 names 表里已经有(view.professions 每项都有 key+name),
+    // 直接读 sel.key 会渲出 cooking 这样的英文键
     var sel = d && d.selected;
-    if (sel) out.push(L("切换到副职:" + (sel.name || sel.key || "未知"), "ok"));
+    if (sel) {
+      var selKey = sel.professionKey || sel.key || null;
+      out.push(L("切换到副职:" + (sel.name || (selKey ? nameOf(selKey) : null) || "未知"), "ok"));
+    }
 
     var q = take(d && d.enqueued);
     if (q.rows.length) {
@@ -425,6 +431,8 @@
   // 且是本次调用的产物;notices 是收件箱,会混进别的动作的结果,不能用。
   var bossAttempt = function (a, out) {
     var name = (a && (a.name || a.bossKey)) || "未知首领";
+    // 难度记在每条结果上:个人与地图首领各有自己那档,只在开头写一次会张冠李戴
+    if (a && a.difficulty) name += "(" + PGL.difficulty(a.difficulty) + ")";
     if (a && a.dryRun) {
       var f = a.forecast || {};
       var verdict = f.predictedWin === true ? "预测能赢" : f.predictedWin === false ? "预测打不过" : "预测结果未知";
@@ -482,13 +490,13 @@
     }
   };
 
-  // ⑤ 首领。地图/个人首领与世界首领共用一个渲染器,字段各取所需
+  // ⑤ 首领。三类首领共用一个渲染器,字段各取所需 ——
+  // 世界首领只有 assisted/skipped,没有 gate 也没有难度,那几行自然不出现。
   R.boss = function (d, out) {
     if (!d) { out.push(L("服务端没有返回首领结果", "muted")); return; }
     var g = d.gate;
     if (g) {
-      out.push(L("难度 " + (d.difficulty || "未知") +
-        " · 只打胜率不低于 " + N(g.minWinChance || 0) + "% 的" + (g.requirePredictedWin ? "、且预测必胜的" : "") +
+      out.push(L("只打胜率不低于 " + N(g.minWinChance || 0) + "% 的" + (g.requirePredictedWin ? "、且预测必胜的" : "") +
         " · " + (g.useTickets ? "允许消耗门票" : "不消耗门票"), "head"));
     }
     if (typeof d.freeAttemptsLeft === "number") out.push(L("剩余免费次数 " + N(d.freeAttemptsLeft), "muted"));
@@ -497,12 +505,12 @@
     att.rows.forEach(function (a) { bossAttempt(a, out); });
     att.notes.forEach(function (n) { out.push(L(n, "muted")); });
 
-    // 世界首领是协助语义,没有胜负
+    // 世界首领是协作语义,没有胜负也没有难度
     var asst = take(d.assisted);
     if (asst.rows.length) {
-      out.push(L("协助世界首领 " + asst.rows.length + " 次", "ok"));
+      out.push(L("协作讨伐世界首领 " + asst.rows.length + " 次", "ok"));
       asst.rows.forEach(function (a) {
-        out.push(L((a.name || a.bossKey || "未知首领") + (a.reason ? " —— 打不过,改为协助(" + a.reason + ")" : "") + resultNote(a.result), "", 1));
+        out.push(L((a.name || a.bossKey || "未知首领") + resultNote(a.result), "", 1));
       });
     }
     // 实测 worldStatus 返回的是实例数组(每项 bossKey/status/hpPercent/participantCount),
@@ -512,11 +520,10 @@
     asArr(d.attempted).concat(asArr(d.assisted)).forEach(function (a) {
       if (a && a.bossKey && a.name) names[a.bossKey] = a.name;
     });
-    var WB_STATE = { active: "进行中", closed: "已结束", pending: "未开放" };
     take(d.status).rows.forEach(function (s) {
       if (!s || typeof s !== "object") return;
       var bits = [];
-      if (s.status) bits.push(WB_STATE[s.status] || s.status);
+      if (s.status) bits.push(PGL.worldStatus(s.status));
       if (isNum(s.hpPercent)) bits.push("剩余血量 " + N(s.hpPercent) + "%");
       if (isNum(s.participantCount)) bits.push(N(s.participantCount) + " 人参战");
       if (bits.length) out.push(L((names[s.bossKey] || s.bossKey || "世界首领") + ":" + bits.join(" · "), "muted"));
@@ -585,7 +592,8 @@
     inventory: "背包分解",
     profession: "副职结算",
     guild: "公会日常",
-    "boss.map": "地图/个人首领",
+    "boss.personal": "个人首领",
+    "boss.map": "地图首领",
     "boss.world": "世界首领",
     activity: "活动奖励",
     dailyRun: "一键全部日常",
@@ -593,10 +601,11 @@
     status: "账号状态"
   };
 
-  // 动作 → 渲染器。boss.map 与 boss.world 共用
+  // 动作 → 渲染器。三类首领共用 R.boss
   var RENDER_BY_JOB = {
     collect: "collect", inventory: "inventory", profession: "profession", guild: "guild",
-    "boss.map": "boss", "boss.world": "boss", activity: "activity", dailyRun: "dailyRun"
+    "boss.personal": "boss", "boss.map": "boss", "boss.world": "boss",
+    activity: "activity", dailyRun: "dailyRun"
   };
 
   // 一键全部日常:逐段套用对应渲染器

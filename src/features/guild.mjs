@@ -22,6 +22,29 @@ function rowItemId(row) {
   return null;
 }
 
+// 可兑换清单 = 公会仓库(guild.view 的 storage)。兑换记录实测 itemKey 就是仓库里那个键
+// (如 skill_page),与 /api/guild/redeem 收的字段同名。
+// 注意别跟 supplies 混:那是另一套「公会补给」,走 /api/guild/supply/purchase 收 supplyKey,
+// 本项目没有实现,所以不往这里塞。
+// 顺带带出 equipmentDonationMinQuality —— 公会自己设的装备捐献品质下限,页面要照它显示。
+export async function redeemableItems(api) {
+  const g = await view(api);
+  const rows = Array.isArray(g?.storage) ? g.storage : [];
+  return {
+    items: rows
+      .map((row) => ({
+        itemKey: rowItemKey(row),
+        name: row?.name ?? null,
+        quality: row?.quality ?? null,
+        amount: row?.amount ?? null
+      }))
+      .filter((r) => r.itemKey),
+    equipmentDonationMinQuality: g?.equipmentDonationMinQuality ?? null,
+    canDonate: g?.canDonate !== false,
+    donationBlockedReason: (g?.donationBlockedReason ?? "").trim() || null
+  };
+}
+
 // 可捐献物品清单,同时供 WebUI 下拉渲染。amount 是当前持有数量。
 export async function donatableItems(api) {
   const { items } = await listInventory(api);
@@ -40,6 +63,18 @@ export async function donatableItems(api) {
 export async function dailyRoutine(api, { redeem = [], donate = [], equipmentDonate = [], claimDividend = true, claimProgressPoints = [] } = {}) {
   const out = { redeemed: [], donated: [], equipmentDonated: [], dividend: null, progress: [], errors: [] };
 
+  // 中文名解析器。日志里只有 itemKey 就会渲出 skill_page 这种裸键,
+  // 而清单本来就要查(捐献必须靠它换 itemId),顺手把名字带上。
+  // 清单只在真的要用时查一次;查不到名字不算失败 —— 名字只影响日志好看,不影响动作能不能做。
+  const lazyList = (load) => {
+    let rows = null;
+    return async () => {
+      if (rows === null) rows = await load().catch(() => []);
+      return rows;
+    };
+  };
+  const stockRows = lazyList(async () => (await redeemableItems(api)).items);
+
   for (const entry of redeem) {
     const itemKey = typeof entry === "string" ? entry : entry?.itemKey;
     const amount = typeof entry === "string" ? 1 : entry?.amount ?? 1;
@@ -47,10 +82,11 @@ export async function dailyRoutine(api, { redeem = [], donate = [], equipmentDon
       out.errors.push({ step: "redeem", error: "缺少 itemKey", entry });
       continue;
     }
+    const name = (await stockRows()).find((r) => r.itemKey === itemKey)?.name ?? null;
     try {
-      out.redeemed.push({ itemKey, amount, result: await redeemItem(api, itemKey, amount) });
+      out.redeemed.push({ itemKey, name, amount, result: await redeemItem(api, itemKey, amount) });
     } catch (err) {
-      out.errors.push({ step: "redeem", itemKey, error: err.message });
+      out.errors.push({ step: "redeem", itemKey, name, error: err.message });
     }
   }
 
@@ -60,6 +96,7 @@ export async function dailyRoutine(api, { redeem = [], donate = [], equipmentDon
     const itemKey = typeof entry === "string" ? entry : entry?.itemKey;
     const amount = typeof entry === "string" ? 1 : entry?.amount ?? 1;
     let itemId = typeof entry === "string" ? null : entry?.itemId ?? null;
+    let name = null;
 
     if (!itemId && !itemKey) {
       out.errors.push({ step: "donate", error: "缺少 itemKey", entry });
@@ -81,12 +118,13 @@ export async function dailyRoutine(api, { redeem = [], donate = [], equipmentDon
         continue;
       }
       itemId = hit.itemId;
+      name = hit.name;
     }
 
     try {
-      out.donated.push({ itemKey, itemId, amount, result: await donateItem(api, itemId, amount) });
+      out.donated.push({ itemKey, name, itemId, amount, result: await donateItem(api, itemId, amount) });
     } catch (err) {
-      out.errors.push({ step: "donate", itemKey, itemId, error: err.message });
+      out.errors.push({ step: "donate", itemKey, name, itemId, error: err.message });
     }
   }
 

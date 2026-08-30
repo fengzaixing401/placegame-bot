@@ -56,21 +56,35 @@ export function buildActions(config) {
       });
     },
 
-    // types 不在这里兜底:交给 runBosses 按 challengePersonal 决定,
-    // 免得这里写死 PERSONAL 把"个人首领默认不打"的设置绕过去
+    // 三类首领三个动作,各自只碰自己那类 —— 页面上是三个面板,难度与名单都不共用。
+    // types 写死成本类型:否则一个动作会顺带打掉另一类的次数。
     "boss.map": async (api, row, args = {}) => {
       const r = withOverride(rules(row).boss, args?.rules);
       return boss.runBosses(api, {
-        types: args?.types,
+        types: [boss.BOSS_TYPE.MAP],
         rules: r,
         maxChallenges: args?.maxChallenges ?? r.maxChallengesPerRun,
         dryRun: args?.dryRun === true
       });
     },
 
+    // 个人首领:安全闸门是 personalBosses 必须点名,空名单一个都不打。
+    // challengePersonal 只管"要不要自动排程",由 scheduler 判断,不在这里拦手动执行 ——
+    // 用户点开这个面板按确定执行,意图已经很明确了。
+    "boss.personal": async (api, row, args = {}) => {
+      const r = withOverride(rules(row).boss, args?.rules);
+      return boss.runBosses(api, {
+        types: [boss.BOSS_TYPE.PERSONAL],
+        rules: r,
+        maxChallenges: args?.maxChallenges ?? r.maxChallengesPerRun,
+        dryRun: args?.dryRun === true
+      });
+    },
+
+    // 世界首领只参与协作,没有难度也没有胜率闸门
     "boss.world": async (api, row, args = {}) => {
       const r = withOverride(rules(row).boss, args?.rules);
-      return boss.runWorldBoss(api, { rules: r, assistOnly: args?.assistOnly === true });
+      return boss.runWorldBoss(api, { rules: r });
     },
 
     async activity(api, row, args = {}) {
@@ -89,36 +103,115 @@ export function buildActions(config) {
     // 只读:给 WebUI 表单喂真实可选项,避免让用户手写 key。
     // 单项失败不影响其余,表单能渲染多少算多少。
     async options(api) {
-      const [snapshot, bag, equipment, profView] = await Promise.all([
+      const [snapshot, bag, equipment, profView, guildView] = await Promise.all([
         boss.bossSnapshot(api).catch((err) => ({ error: err.message, bosses: [] })),
         guild.donatableItems(api).catch((err) => ({ error: err.message })),
         // 品质与属性名都取自真实背包,不写死枚举 —— 见 inventory.equipmentSummary
         inventory.equipmentSummary(api).catch((err) => ({ error: err.message })),
-        profession.view(api).catch((err) => ({ error: err.message }))
+        profession.view(api).catch((err) => ({ error: err.message })),
+        // 兑换清单来自公会仓库,页面据此渲染下拉,不让用户手写商店 key
+        guild.redeemableItems(api).catch((err) => ({ error: err.message }))
       ]);
       const bosses = snapshot.bosses ?? [];
-      return {
-        bosses: bosses.map((b) => ({
+      // 每个首领只送页面用得上的字段。整行直接透传会把 21 份战斗预测和参与者榜单
+      // 一起塞进响应,页面一个也用不到。
+      const bossView = (b) => {
+        const view = {
           bossKey: b.key ?? b.bossKey ?? null,
           name: b.name ?? null,
           type: b.type ?? null,
-          available: b.available !== false,
-          blockedReason: boss.blockedReason(b),
-          remainingAttemptCount: b.remainingAttemptCount ?? null
-        })),
+          mapName: b.mapName ?? null,
+          requiredLevel: typeof b.requiredLevel === "number" ? b.requiredLevel : null,
+          // 各难度自带胜率与消耗,与游戏内难度选择界面同源
+          difficulties: (b.difficultyOptions ?? []).map((o) => ({
+            key: o.key,
+            name: o.name ?? o.key,
+            chance: typeof o.chance === "number" ? o.chance : null,
+            predictedWin: typeof o.predictedWin === "boolean" ? o.predictedWin : null,
+            ticketCost: typeof o.ticketCost === "number" ? o.ticketCost : null,
+            goldCost: typeof o.goldCost === "number" ? o.goldCost : null,
+            materialName: o.materialName ?? null,
+            materialCost: typeof o.materialCost === "number" ? o.materialCost : null,
+            ownedMaterial: typeof o.ownedMaterial === "number" ? o.ownedMaterial : null,
+            rewardPreview: Array.isArray(o.rewardPreview) ? o.rewardPreview : [],
+            blockedReason: (o.blockedReason ?? "").trim() || null
+          })),
+          blockedReason: boss.blockedReason(b)
+        };
+        if (b.type === "personal") view.attemptPool = boss.attemptPool(b);
+        // 世界首领只协作:送协作闸门与本场次进度,不送难度相关的胜率判断
+        if (b.type === "world") {
+          view.assistBlockedReason = boss.assistBlockedReason(b);
+          const inst = b.worldInstance;
+          view.instance = inst
+            ? {
+                status: inst.status ?? null,
+                hpPercent: typeof inst.hpPercent === "number" ? inst.hpPercent : null,
+                participantCount: typeof inst.participantCount === "number" ? inst.participantCount : null,
+                myAttemptCount: typeof inst.myAttemptCount === "number" ? inst.myAttemptCount : null,
+                maxAttemptCount: typeof inst.maxAttemptCount === "number" ? inst.maxAttemptCount : null,
+                remainingAttemptCount:
+                  typeof inst.remainingAttemptCount === "number" ? inst.remainingAttemptCount : null,
+                rewardStatus: inst.rewardStatus ?? null
+              }
+            : null;
+        }
+        return view;
+      };
+
+      // 按类型分组:页面上三类首领是三个面板,数量也不同(实测个人 9 / 地图 5 / 世界 7)。
+      // 不硬编码数量 —— 等级与场次都会影响服务端返回哪些。
+      const byType = { personal: [], map: [], world: [] };
+      for (const b of bosses) {
+        const list = byType[b.type];
+        if (list) list.push(bossView(b));
+      }
+
+      return {
+        bosses: bosses.map(bossView),
+        bossesByType: byType,
         // 查不到就只有 "normal" 可信 —— 不猜难度枚举
         difficulties: boss.difficultyOptions(bosses),
-        personalAttempts: snapshot.personalAttempts ?? null,
-        freeAttemptsLeft: boss.freeAttemptsLeft(snapshot.personalAttempts),
+        // 技能/战术/词缀/目标部位,服务端自带中文名
+        challengeOptions: boss.challengeOptions(bosses),
+        freeAttemptsLeft: boss.freeAttemptsLeft(bosses),
         donatableItems: Array.isArray(bag) ? bag : [],
-        professions: profession.PROFESSIONS,
-        // 副职动作:排队表单用,取游戏返回的 key+中文名,避免让用户手写 key
+        // 兑换用公会仓库清单;捐献用背包清单 —— 两套不同的东西,接口收的字段也不同
+        redeemableItems: Array.isArray(guildView?.items) ? guildView.items : [],
+        guild: {
+          equipmentDonationMinQuality: guildView?.equipmentDonationMinQuality ?? null,
+          canDonate: guildView?.canDonate !== false,
+          donationBlockedReason: guildView?.donationBlockedReason ?? null
+        },
+        // 副职:优先用游戏返回的中文名(采药/垂钓/烹饪/炼金),读不到才回落到本地键名。
+        // 本地 PROFESSIONS 只是校验白名单,直接拿它当下拉项会让页面显示英文键。
+        professions: Array.isArray(profView?.professions) && profView.professions.length
+          ? profView.professions
+              .map((p) => ({
+                key: p.key ?? null,
+                name: p.name ?? p.key ?? null,
+                level: typeof p.level === "number" ? p.level : null
+              }))
+              .filter((p) => p.key)
+          : profession.PROFESSIONS.map((key) => ({ key, name: key, level: null })),
+        selectedProfession: profView?.selectedProfessionKey ?? null,
+        // 副职动作:18 个动作横跨 4 个副职,必须带 professionKey 才能在页面上分组 ——
+        // 混成一个下拉会让人选到别的副职的动作,要等运行时才失败。
         professionActions: Array.isArray(profView?.actions)
-          ? profView.actions.map((a) => ({ key: a.key ?? a.actionKey ?? null, name: a.name ?? null })).filter((a) => a.key)
+          ? profView.actions
+              .map((a) => ({
+                key: a.key ?? a.actionKey ?? null,
+                name: a.name ?? null,
+                professionKey: a.professionKey ?? null,
+                requiredLevel: typeof a.requiredLevel === "number" ? a.requiredLevel : null,
+                unlocked: a.unlocked !== false,
+                blockedReason: (a.blockedReason ?? "").trim() || null
+              }))
+              .filter((a) => a.key)
           : [],
         // 分解条件表单用:品质取值+件数、属性键全集、可分解件数
         equipment: equipment?.error ? { total: 0, disposable: 0, qualities: [], attrKeys: [], rareRanks: [] } : equipment,
-        errors: [snapshot.error, bag?.error, equipment?.error, profView?.error].filter(Boolean)
+        errors: [snapshot.error, bag?.error, equipment?.error, profView?.error, guildView?.error].filter(Boolean)
       };
     },
 
@@ -146,6 +239,12 @@ export function buildActions(config) {
       ["profession", r.profession?.enabled, () => actions.profession(api, row, args)],
       ["guild", r.guild?.enabled, () => actions.guild(api, row, args)],
       ["boss.map", r.boss?.enabled, () => actions["boss.map"](api, row, args)],
+      // 个人首领另有开关:次数有限,不能被"一键日常"顺带打光
+      [
+        "boss.personal",
+        r.boss?.enabled && r.boss?.challengePersonal === true,
+        () => actions["boss.personal"](api, row, args)
+      ],
       ["activity", r.activity?.enabled, () => actions.activity(api, row, args)]
     ];
     const out = { ran: {}, skipped: [], errors: [] };

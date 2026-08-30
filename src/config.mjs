@@ -53,29 +53,36 @@ const DEFAULTS = {
     },
     boss: {
       enabled: true,
+      // 地图首领。难度与个人首领各存一份:页面上是两个面板,共用一个字段会互相覆盖
       difficulty: "normal",
-      // 地图首领:留空 = 打列表里所有可挑战的
+      // 留空 = 打列表里所有可挑战的
       mapBosses: [],
-      // 个人首领必须显式开启并列出目标。默认关,否则会把野猪王之类的次数打光
+      mapIntervalHours: 2, // 地图首领刷新周期
+      // 个人首领。默认不排程,否则会把野猪王之类的每日次数打光
       challengePersonal: false,
+      personalDifficulty: "normal",
+      // 留空 = 一个都不打(与地图首领相反)。这是个人首领的安全闸门
       personalBosses: [],
-      // 门票只能客户端侧卡:接口没有门票参数,免费次数用尽后服务端会自动扣票
+      personalIntervalHours: 24, // 免费次数按北京时间每日重置
+      // 世界首领:只参与协作讨伐,没有难度也没有胜率预测。留空 = 全部参与
+      worldBosses: [],
+      worldWindows: [
+        // 北京时间
+        { start: "10:00", end: "11:00" },
+        { start: "16:00", end: "17:00" },
+        { start: "20:00", end: "21:00" }
+      ],
+      // 门票有两条扣除路径:难度档自带 ticketCost(地图困难 1 张/噩梦 2 张),
+      // 以及个人首领免费次数用尽后服务端自动扣票。为假时两条都拦。
       useTickets: false,
-      // 胜率闸门:真实挑战前先 preview,不达标就跳过
+      // 胜率闸门,只作用于个人/地图首领。先看难度档自带的胜率,过了再 preview 确认
       minWinChance: 80,
       requirePredictedWin: true,
       selectedSkillKeys: [],
       buffKey: "",
       affixKey: "",
       useMaterialBoost: false,
-      maxChallengesPerRun: 5,
-      mapIntervalHours: 2, // 地图首领刷新周期
-      worldWindows: [
-        // 世界首领,北京时间
-        { start: "10:00", end: "11:00" },
-        { start: "16:00", end: "17:00" },
-        { start: "20:00", end: "21:00" }
-      ]
+      maxChallengesPerRun: 5
     },
     activity: {
       enabled: true,

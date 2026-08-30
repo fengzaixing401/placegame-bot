@@ -131,6 +131,14 @@ export class Scheduler {
     }
     if (rules.boss?.enabled) {
       jobs.push({ key: "boss.map", idem: `boss.map:${slot(rules.boss.mapIntervalHours)}` });
+      // 个人首领要显式开 challengePersonal 才排程:每日免费次数有限,
+      // 用完服务端就自动扣门票,不该默认自动消耗。
+      if (rules.boss.challengePersonal === true) {
+        jobs.push({
+          key: "boss.personal",
+          idem: `boss.personal:${slot(rules.boss.personalIntervalHours ?? 24)}`
+        });
+      }
       const win = activeWindow(parts, rules.boss.worldWindows);
       if (win) jobs.push({ key: "boss.world", idem: `boss.world:${parts.date}:${win}` });
     }

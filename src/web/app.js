@@ -79,13 +79,13 @@ function showGate(needsSetup) {
   const setup = gateMode === "setup";
   $("gate-title").textContent = setup ? "首次设置" : "登录";
   $("gate-hint").textContent = setup
-    ? "还没有 WebUI 密码。用 .env 里的 PLACEGAME_API_TOKEN 验证身份,并设置一个至少 12 位的密码。"
+    ? "还没有 WebUI 密码。用 .env 里的 PLACEGAME_API_TOKEN 验证身份,并设置一个登录密码。"
     : "";
   $("gate-token-row").hidden = !setup;
   $("gate-confirm-row").hidden = !setup;
   $("gate-token").required = setup;
   $("gate-confirm").required = setup;
-  $("gate-pw-label").textContent = setup ? "设置密码(至少 12 位)" : "密码";
+  $("gate-pw-label").textContent = setup ? "设置密码" : "密码";
   $("gate-password").autocomplete = setup ? "new-password" : "current-password";
   $("gate-submit").textContent = setup ? "设置并登录" : "进入";
   $("gate-password").focus();
@@ -101,7 +101,7 @@ $("gate-form").addEventListener("submit", async (e) => {
   try {
     if (gateMode === "setup") {
       if (password !== $("gate-confirm").value) throw new Error("两次输入的密码不一致");
-      if (password.length < 12) throw new Error("密码至少 12 位");
+      if (!password) throw new Error("密码不能为空");
       await api("POST", "/api/web/setup", { body: { password }, token: $("gate-token").value.trim() });
     }
     const data = await api("POST", "/api/web/login", { body: { password } });
@@ -145,6 +145,7 @@ const ACTIONS = [
   { path: "inventory/decompose", job: "inventory", label: "背包分解", panel: "inventory", preview: true },
   { path: "profession/settle", job: "profession", label: "副职结算", panel: "profession" },
   { path: "guild/daily", job: "guild", label: "公会日常", panel: "guild" },
+  { path: "boss/personal", job: "boss.personal", label: "个人首领", panel: "bossPersonal", preview: true },
   { path: "boss/map", job: "boss.map", label: "地图首领", panel: "bossMap", preview: true },
   { path: "boss/world", job: "boss.world", label: "世界首领", panel: "bossWorld" },
   { path: "activity/claim-all", job: "activity", label: "领活动奖励", panel: "activity" },
@@ -153,7 +154,7 @@ const ACTIONS = [
     job: "dailyRun",
     label: "一键全部日常",
     panel: null,
-    note: "按已保存的规则依次执行:收益、分解、副职、公会、地图首领、活动奖励。用的是保存过的规则,不是上面各面板里的临时改动。"
+    note: "按已保存的规则依次执行:收益、分解、副职、公会、地图首领、活动奖励。个人首领要在它自己的面板里勾上「加入自动排程」才会跟着跑。用的是保存过的规则,不是上面各面板里的临时改动。"
   }
 ];
 
@@ -226,22 +227,58 @@ function fSelect(labelText, value, options, hint) {
 
 // 难度:服务端给了枚举就用下拉,没给就用文本框并说明只有 normal 可信。
 // 不猜取值 —— 静态来源里查不到难度枚举。
-function fDifficulty(value, difficulties) {
-  if (Array.isArray(difficulties) && difficulties.length > 0) {
-    const opts = difficulties.includes(value) ? difficulties : [value, ...difficulties].filter(Boolean);
-    return fSelect("难度", value, opts, "取自游戏返回的可选难度");
+// difficulties 是 [{key,name}],name 是服务端自带的中文名(普通/困难/噩梦),显示中文存 key。
+// onChange 用于让首领列表跟着换档重算胜率与消耗 —— 那些数字是逐档不同的。
+function fDifficulty(labelText, value, difficulties, { onChange, hint } = {}) {
+  const rows = Array.isArray(difficulties) ? difficulties : [];
+  if (rows.length > 0) {
+    const opts = rows.map((d) => [d.key, d.name ?? d.key]);
+    // 已存的取值不在服务端枚举里也要留着,否则一渲染就把用户的设置改掉了
+    if (value && !rows.some((d) => d.key === value)) opts.unshift([value, `${value}(游戏未返回此档)`]);
+    const f = fSelect(labelText, value, opts, hint ?? "与游戏内难度选择界面一致");
+    if (onChange) f.node.querySelector("select").addEventListener("change", onChange);
+    return f;
   }
-  return fText("难度", value || "normal", {
+  return fText(labelText, value || "normal", {
     hint: "游戏未返回可选难度列表,已确认可用的只有 normal。填别的值有被服务端拒绝的风险。"
   });
 }
 
+// 首领行的说明文字。逐档不同的东西(胜率、门票、材料)必须按当前选档算,
+// 否则页面显示普通档的 0 张门票,实跑困难档却扣 2 张。
+function bossRowHint(r, difficulty) {
+  const bits = [];
+  if (r.mapName) bits.push(r.mapName);
+  if (typeof r.requiredLevel === "number") bits.push(`需 ${r.requiredLevel} 级`);
+  const d = (r.difficulties ?? []).find((x) => x.key === difficulty);
+  if (d) {
+    if (typeof d.chance === "number") bits.push(`胜率 ${d.chance}%`);
+    if (typeof d.ticketCost === "number") bits.push(d.ticketCost > 0 ? `扣 ${d.ticketCost} 张门票` : "不扣门票");
+    if (d.materialName && typeof d.materialCost === "number" && d.materialCost > 0) {
+      const owned = typeof d.ownedMaterial === "number" ? `,有 ${d.ownedMaterial}` : "";
+      bits.push(`${d.materialName} ${d.materialCost}${owned}`);
+    }
+    if (d.blockedReason) bits.push(`本档不可打:${d.blockedReason}`);
+  }
+  if (r.attemptPool) {
+    const p = r.attemptPool;
+    if (typeof p.freeRemaining === "number") bits.push(`免费 ${p.freeRemaining}/${p.freeLimit ?? "?"}`);
+  }
+  if (r.blockedReason) bits.push(`不可挑战:${r.blockedReason}`);
+  return bits.join(" · ");
+}
+
 // 首领多选。allowAll=true 时提供"全部可挑战的"开关(空数组语义);
 // 个人首领没有这个开关 —— 空数组就是不打,这是刻意的。
-function fBossList(labelText, value, rows, { allowAll = false, hint } = {}) {
+// describe 给每行算说明文字;换难度后调 refresh() 重算,不必重建整个面板。
+// 首领多选。allowAll=true 时提供"全部可挑战的"开关(空数组语义);
+// 个人首领没有这个开关 —— 空数组就是不打,这是刻意的。
+// describe 逐行生成说明文字,配合 refresh() 让换难度后的胜率/消耗跟着重算。
+function fBossList(labelText, value, rows, { allowAll = false, hint, describe } = {}) {
   const kept = (value ?? []).map(String);
   const selected = new Set(kept);
   const boxes = [];
+  const notes = [];
   const list = el("div", { className: "checklist" });
 
   if (rows.length === 0) {
@@ -259,14 +296,15 @@ function fBossList(labelText, value, rows, { allowAll = false, hint } = {}) {
     if (!key) continue;
     const box = el("input", { type: "checkbox", checked: selected.has(key) || selected.has(String(r.name)) });
     boxes.push([box, key]);
-    const state = r.blockedReason ? `不可挑战:${r.blockedReason}` : "可挑战";
+    const note = el("span", { className: "hint", textContent: describe ? describe(r) : key });
+    notes.push([note, r]);
     list.append(
       el(
         "label",
         { className: "check-row" },
         box,
         el("span", { className: "check-name", textContent: r.name ?? key }),
-        el("span", { className: "hint", textContent: `${key} · ${state}` })
+        note
       )
     );
   }
@@ -287,6 +325,10 @@ function fBossList(labelText, value, rows, { allowAll = false, hint } = {}) {
 
   return {
     node: wrap,
+    refresh: () => {
+      if (!describe) return;
+      for (const [note, r] of notes) note.textContent = describe(r);
+    },
     // 列表没渲染出来时(取选项失败)一个框都没有,照常读就会把已存的选择清空。
     // 对 mapBosses 更糟:空数组等于"全部可挑战的都打",等于把精选名单换成无脑全打。
     read: () => {
@@ -358,19 +400,30 @@ function section(title, fields) {
   };
 }
 
-function itemRow(init, { placeholder, items }) {
-  // 有背包数据就下拉选,没有就退回文本框手填 key
+// amountWord:数量那个数是谁的存量。捐献看自己背包(持有),兑换看公会仓库(库存),
+// 两者都叫"持有"会让人以为兑换也受自己背包限制。
+// missingWord:已存的 key 不在清单里时怎么说 —— 说错了会让人以为物品丢了。
+function itemRow(init, { placeholder, items, amountWord = "持有", missingWord = "不在背包" }) {
+  // 有清单就下拉选,没有就退回文本框手填 key
   let keyCtl;
   const known = Array.isArray(items) && items.length > 0;
   if (known) {
     keyCtl = el("select", {});
     keyCtl.append(el("option", { value: "", textContent: "— 选择物品 —" }));
     for (const it of items) {
-      const text = it.amount === null ? `${it.name ?? it.itemKey}` : `${it.name ?? it.itemKey}(持有 ${it.amount})`;
-      keyCtl.append(el("option", { value: it.itemKey, textContent: text, selected: it.itemKey === init?.itemKey }));
+      // 品质显示游戏内档位名(普通/优秀/…),清单没给品质就不显示
+      const marks = [];
+      if (it.quality) marks.push(PGL.quality(it.quality));
+      if (it.amount !== null && it.amount !== undefined) marks.push(`${amountWord} ${it.amount}`);
+      const base = it.name ?? it.itemKey;
+      keyCtl.append(el("option", {
+        value: it.itemKey,
+        textContent: marks.length ? `${base}(${marks.join(" · ")})` : base,
+        selected: it.itemKey === init?.itemKey
+      }));
     }
     if (init?.itemKey && !items.some((i) => i.itemKey === init.itemKey)) {
-      keyCtl.append(el("option", { value: init.itemKey, textContent: `${init.itemKey}(不在背包)`, selected: true }));
+      keyCtl.append(el("option", { value: init.itemKey, textContent: `${init.itemKey}(${missingWord})`, selected: true }));
     }
   } else {
     keyCtl = el("input", { type: "text", value: init?.itemKey ?? "", placeholder, spellcheck: false });
@@ -387,13 +440,13 @@ function itemRow(init, { placeholder, items }) {
   };
 }
 
-// 品质多选。取值一律用背包里真实存在的内部值(red/orange/…),不翻译成中文 ——
-// 分解不可逆,只有 red=传说 在真号掉落里确认过,标错中文名会让人拆掉不该拆的。
+// 品质多选。显示游戏内的中文档位名,存进规则的仍是服务端认的内部值(white/green/…)。
+// 映射表只有 src/labels.mjs 一份,经 /labels.js 挂到 window.PGLabels。
 function fQualities(value, qualities) {
   const selected = new Set((value ?? []).map(String));
   const boxes = [];
   const list = el("div", { className: "checklist" });
-  const rows = Array.isArray(qualities) ? qualities : [];
+  const rows = PGL.sortQualities(Array.isArray(qualities) ? qualities : [], (q) => String(q.quality));
   if (!rows.length) {
     // 没读到背包就退回文本框,不编枚举
     const input = el("input", {
@@ -408,14 +461,20 @@ function fQualities(value, qualities) {
     };
   }
   for (const q of rows) {
-    const box = el("input", { type: "checkbox", checked: selected.has(String(q.quality)) });
-    boxes.push([box, String(q.quality)]);
+    const key = String(q.quality);
+    const box = el("input", { type: "checkbox", checked: selected.has(key) });
+    boxes.push([box, key]);
     list.append(
-      el("label", { className: "check-item" }, box, el("span", { textContent: `${q.quality}(${q.count} 件)` }))
+      el(
+        "label",
+        { className: "check-item" },
+        box,
+        el("span", { textContent: `${PGL.quality(key)}(${q.count} 件)` })
+      )
     );
   }
   return {
-    node: field("可分解品质", list, "取值是游戏内部品质值,件数取自当前背包。留空 = 不按品质筛"),
+    node: field("可分解品质", list, "档位名与游戏内一致,件数取自当前背包。留空 = 不按品质筛"),
     read: () => boxes.filter(([b]) => b.checked).map(([, v]) => v)
   };
 }
@@ -510,10 +569,18 @@ function panelInventory(r, opts) {
 }
 
 function panelProfession(r, opts) {
+  // 显示游戏内的中文副职名,存进规则的仍是服务端认的键(herbalism/…)。
+  // 等级一并显示:动作有等级门槛,不看等级就不知道排的队能不能真跑起来。
+  const profRows = opts?.professions ?? [];
+  const current = opts?.selectedProfession ?? null;
+  const profName = (key) => profRows.find((p) => p.key === key)?.name ?? key;
   const prof = fSelect(
     "副职",
     r.profession?.professionKey,
-    [["", "不切换"], ...(opts?.professions ?? [])],
+    [
+      ["", current ? `不切换(当前:${profName(current)})` : "不切换"],
+      ...profRows.map((p) => [p.key, p.level === null ? p.name : `${p.name}(${p.level} 级)`])
+    ],
     "留「不切换」则沿用游戏内当前副职"
   );
   const actions = opts?.professionActions ?? [];
@@ -525,8 +592,25 @@ function panelProfession(r, opts) {
       if (actions.length) {
         ctl = el("select", {});
         ctl.append(el("option", { value: "", textContent: "— 选择动作 —" }));
+        // 按副职分组:18 个动作平铺在一个下拉里分不清哪个属于哪个副职,
+        // 选错了要等运行时 enqueue 失败才知道。未解锁的标出来但仍可选 ——
+        // 是否真能排队由服务端定,页面不替它拦。
+        const groups = new Map();
         for (const a of actions) {
-          ctl.append(el("option", { value: a.key, textContent: a.name ?? a.key, selected: a.key === init?.actionKey }));
+          const g = a.professionKey ?? "";
+          if (!groups.has(g)) groups.set(g, []);
+          groups.get(g).push(a);
+        }
+        for (const [key, rows] of groups) {
+          const host = key ? el("optgroup", { label: profName(key) }) : ctl;
+          for (const a of rows) {
+            const marks = [];
+            if (a.requiredLevel) marks.push(`${a.requiredLevel} 级`);
+            if (!a.unlocked) marks.push(a.blockedReason ?? "未解锁");
+            const text = marks.length ? `${a.name ?? a.key}(${marks.join(" · ")})` : a.name ?? a.key;
+            host.append(el("option", { value: a.key, textContent: text, selected: a.key === init?.actionKey }));
+          }
+          if (host !== ctl) ctl.append(host);
         }
         if (init?.actionKey && !actions.some((a) => a.key === init.actionKey)) {
           ctl.append(el("option", { value: init.actionKey, textContent: `${init.actionKey}(不在可选列表)`, selected: true }));
@@ -563,13 +647,27 @@ function panelProfession(r, opts) {
 
 function panelGuild(r, opts) {
   const items = opts?.donatableItems ?? [];
+  // 兑换清单是公会仓库,与捐献用的背包不是一套 —— 接口收的字段也不同(见 features/guild.mjs)
+  const stock = opts?.redeemableItems ?? [];
+  const g = opts?.guild ?? {};
   const dividend = fBool("领公会分红", r.guild?.claimDividend, "游戏要求当日先完成捐献才能领");
+  const donateHint = g.canDonate === false
+    ? `现在捐不了:${g.donationBlockedReason ?? "游戏未说明原因"}`
+    : "按物品选,运行时自动换成背包里的实例 ID" +
+      (g.equipmentDonationMinQuality
+        ? `。本公会装备捐献品质下限:${PGL.quality(g.equipmentDonationMinQuality)}`
+        : "");
   const donate = fRows("捐献", r.guild?.donate ?? [], (init) => itemRow(init, { placeholder: "物品 key", items }), {
-    hint: "按物品选,运行时自动换成背包里的实例 ID",
+    hint: donateHint,
     addText: "添加捐献物品"
   });
-  const redeem = fRows("兑换", r.guild?.redeem ?? [], (init) => itemRow(init, { placeholder: "商店物品 key" }), {
-    hint: "公会商店的物品 key,与捐献不是同一套",
+  const redeem = fRows("兑换", r.guild?.redeem ?? [], (init) => itemRow(init, {
+    placeholder: "仓库物品 key",
+    items: stock,
+    amountWord: "库存",
+    missingWord: "不在公会仓库"
+  }), {
+    hint: "从公会仓库兑换,消耗贡献值。数量按游戏里的兑换次数算",
     addText: "添加兑换物品"
   });
   const payload = () => ({ claimDividend: dividend.read(), donate: donate.read(), redeem: redeem.read() });
@@ -580,67 +678,129 @@ function panelGuild(r, opts) {
   };
 }
 
-// 地图/个人首领。后端 boss.map 收的是 {rules:{...}} 整块覆盖,故这里的键名要与规则一致。
-function panelBossMap(r, opts) {
-  const bosses = opts?.bosses ?? [];
-  const free = opts?.freeAttemptsLeft;
-  const difficulty = fDifficulty(r.boss?.difficulty, opts?.difficulties);
-  const mapBosses = fBossList("地图首领", r.boss?.mapBosses, bosses.filter((b) => b.type === "map"), { allowAll: true });
-  const challengePersonal = fBool("挑战个人首领", r.boss?.challengePersonal, "关闭时完全不碰个人首领");
-  const personalBosses = fBossList("个人首领", r.boss?.personalBosses, bosses.filter((b) => b.type === "personal"), {
-    hint: "一个都不勾就一个都不打" + (typeof free === "number" ? `。当前剩余免费次数 ${free}` : "")
-  });
-  const useTickets = fBool("允许消耗首领门票", r.boss?.useTickets, "免费次数用尽后服务端会自动扣票;关闭则次数用尽就停手");
-  const requireWin = fBool("只在预测会赢时挑战", r.boss?.requirePredictedWin, "挑战前先调预览,预测会输就跳过");
-  const minWin = fNum("最低胜率(%)", r.boss?.minWinChance, { min: 0, max: 100, hint: "0 = 不看胜率", required: true });
-  const maxRun = fNum("本次最多挑战次数", r.boss?.maxChallengesPerRun, { min: 1, max: 50, required: true });
+// 三类首领三个面板,各自只读写自己那几个键。
+// 执行走 withOverride(浅合并到已存规则)、存规则走 mergeRules(深合并),
+// 两条路都容得下只带本面板的键 —— 所以地图面板不必带 personalDifficulty,反之亦然。
+//
+// 门票与胜率闸门是三类共用的一组安全限制(规则树里只有一份),两个面板都能改,
+// 改了对另一类也生效。hint 里写明了,免得以为是各自独立的。
 
-  const fields = [difficulty, mapBosses, challengePersonal, personalBosses, useTickets, requireWin, minWin, maxRun];
-  const payload = () => {
-    const out = {
-      difficulty: difficulty.read(),
-      mapBosses: mapBosses.read(),
-      challengePersonal: challengePersonal.read(),
-      personalBosses: personalBosses.read(),
-      useTickets: useTickets.read(),
-      requirePredictedWin: requireWin.read()
-    };
-    const mw = minWin.read();
-    const mx = maxRun.read();
-    if (mw !== null) out.minWinChance = mw;
-    if (mx !== null) out.maxChallengesPerRun = mx;
-    return out;
-  };
+function bossesOf(opts, type) {
+  return opts?.bossesByType?.[type] ?? (opts?.bosses ?? []).filter((b) => b.type === type);
+}
+
+// 门票/胜率闸门。个人与地图面板各建一份控件,读写的却是同一组规则键。
+function bossGates(r, { ticketHint }) {
+  const useTickets = fBool("允许消耗首领门票", r.boss?.useTickets, ticketHint);
+  const requireWin = fBool("只在预测会赢时挑战", r.boss?.requirePredictedWin, "挑战前先看难度档预估,过了再调一次预览确认");
+  const minWin = fNum("最低胜率(%)", r.boss?.minWinChance, {
+    min: 0,
+    max: 100,
+    hint: "0 = 不看胜率。与上面两项一样,个人首领和地图首领共用这一组设置",
+    required: true
+  });
+  const maxRun = fNum("本次最多挑战次数", r.boss?.maxChallengesPerRun, { min: 1, max: 50, required: true });
   return {
-    node: el("div", { className: "op-form" }, ...fields.map((f) => f.node)),
+    nodes: [useTickets.node, requireWin.node, minWin.node, maxRun.node],
+    into: (out) => {
+      out.useTickets = useTickets.read();
+      out.requirePredictedWin = requireWin.read();
+      const mw = minWin.read();
+      const mx = maxRun.read();
+      if (mw !== null) out.minWinChance = mw;
+      if (mx !== null) out.maxChallengesPerRun = mx;
+      return out;
+    }
+  };
+}
+
+// 个人首领:每日免费次数有限,用尽后服务端自动扣门票。安全闸门是必须点名要打哪几个。
+function panelBossPersonal(r, opts) {
+  const rows = bossesOf(opts, "personal");
+  const free = opts?.freeAttemptsLeft;
+  let list;
+  const difficulty = fDifficulty("难度", r.boss?.personalDifficulty, opts?.difficulties, {
+    onChange: () => list.refresh()
+  });
+  list = fBossList("要打哪几个", r.boss?.personalBosses, rows, {
+    hint:
+      "一个都不勾就一个都不打(这是刻意的:免费次数有限)" +
+      (typeof free === "number" ? `。当前剩余免费次数 ${free}` : ""),
+    describe: (row) => bossRowHint(row, difficulty.read())
+  });
+  const schedule = fBool("加入自动排程", r.boss?.challengePersonal, "只影响自动排程与「一键全部日常」;这个面板按确定执行不受它限制");
+  const gates = bossGates(r, {
+    ticketHint: "免费次数用尽后服务端会自动扣票;关闭则次数用尽就停手。与地图首领共用这项设置"
+  });
+
+  const payload = () =>
+    gates.into({
+      personalDifficulty: difficulty.read(),
+      personalBosses: list.read(),
+      challengePersonal: schedule.read()
+    });
+  return {
+    node: el("div", { className: "op-form" }, difficulty.node, list.node, schedule.node, ...gates.nodes),
     // 整块覆盖:面板里取消勾选必须能生效,逐字段兜底会让取消永远无效
     read: () => ({ rules: payload() }),
     toRules: () => ({ boss: payload() })
   };
 }
 
-function panelBossWorld(r, opts) {
-  const difficulty = fDifficulty(r.boss?.difficulty, opts?.difficulties);
-  const requireWin = fBool("只在预测会赢时挑战", r.boss?.requirePredictedWin);
-  const minWin = fNum("最低胜率(%)", r.boss?.minWinChance, { min: 0, max: 100, hint: "0 = 不看胜率", required: true });
-  const assist = fBool("只协助不主攻", false, "只往别人开的世界首领上打协助,不自己开");
-  const payload = () => {
-    const out = { difficulty: difficulty.read(), requirePredictedWin: requireWin.read() };
-    const mw = minWin.read();
-    if (mw !== null) out.minWinChance = mw;
-    return out;
+// 地图首领:刷新周期短,默认打列表里所有可挑战的。
+function panelBossMap(r, opts) {
+  const rows = bossesOf(opts, "map");
+  let list;
+  const difficulty = fDifficulty("难度", r.boss?.difficulty, opts?.difficulties, {
+    onChange: () => list.refresh()
+  });
+  list = fBossList("要打哪几个", r.boss?.mapBosses, rows, {
+    allowAll: true,
+    describe: (row) => bossRowHint(row, difficulty.read())
+  });
+  const gates = bossGates(r, {
+    ticketHint: "困难档扣 1 张、噩梦档扣 2 张;关闭则这两档一律跳过。与个人首领共用这项设置"
+  });
+
+  const payload = () => gates.into({ difficulty: difficulty.read(), mapBosses: list.read() });
+  return {
+    node: el("div", { className: "op-form" }, difficulty.node, list.node, ...gates.nodes),
+    read: () => ({ rules: payload() }),
+    toRules: () => ({ boss: payload() })
   };
+}
+
+// 世界首领:全服共打一个血条的场次战,只参与协作讨伐 + 领奖。
+// 没有难度也没有胜率预测 —— 个人主攻会按困难/噩梦档扣门票,与"只参与协作"相反。
+function panelBossWorld(r, opts) {
+  const rows = bossesOf(opts, "world");
+  const list = fBossList("参与哪几个", r.boss?.worldBosses, rows, {
+    allowAll: true,
+    describe: (row) => {
+      const bits = [];
+      const inst = row.instance;
+      if (inst) {
+        if (typeof inst.hpPercent === "number") bits.push(`剩余血量 ${inst.hpPercent}%`);
+        if (typeof inst.participantCount === "number") bits.push(`${inst.participantCount} 人参与`);
+        if (typeof inst.remainingAttemptCount === "number") bits.push(`本场次还可协作 ${inst.remainingAttemptCount} 次`);
+      }
+      if (row.assistBlockedReason) bits.push(row.assistBlockedReason);
+      return bits.join(" · ") || String(row.bossKey ?? "");
+    }
+  });
+  const payload = () => ({ worldBosses: list.read() });
   return {
     node: el(
       "div",
       { className: "op-form" },
-      el("p", { className: "hint", textContent: "世界首领只在开放时间窗内可打,时间窗在「通用设置」里配。" }),
-      difficulty.node,
-      requireWin.node,
-      minWin.node,
-      assist.node
+      el("p", {
+        className: "hint",
+        textContent:
+          "只参与协作讨伐并领奖,不主动挑战,所以没有难度和胜率设置。只在开放时间窗内能协作,时间窗在「通用设置」里配。"
+      }),
+      list.node
     ),
-    read: () => ({ rules: payload(), assistOnly: assist.read() }),
+    read: () => ({ rules: payload() }),
     toRules: () => ({ boss: payload() })
   };
 }
@@ -670,6 +830,7 @@ const PANELS = {
   inventory: panelInventory,
   profession: panelProfession,
   guild: panelGuild,
+  bossPersonal: panelBossPersonal,
   bossMap: panelBossMap,
   bossWorld: panelBossWorld,
   activity: panelActivity
@@ -696,8 +857,17 @@ function rulesForm(r) {
       ["intervalHours", fNum("间隔(小时)", r.guild?.intervalHours, { min: 1, max: 48, required: true })]
     ]),
     section("首领", [
-      ["enabled", fBool("排程执行", r.boss?.enabled)],
+      ["enabled", fBool("排程执行", r.boss?.enabled, "关掉则三类首领都不自动执行")],
       ["mapIntervalHours", fNum("地图首领间隔(小时)", r.boss?.mapIntervalHours, { min: 1, max: 24, required: true })],
+      [
+        "personalIntervalHours",
+        fNum("个人首领间隔(小时)", r.boss?.personalIntervalHours, {
+          min: 1,
+          max: 48,
+          hint: "免费次数按北京时间每日重置,填 24 即可。要不要排程在个人首领面板里勾",
+          required: true
+        })
+      ],
       [
         "worldWindows",
         fRows(

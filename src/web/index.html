@@ -82,10 +82,10 @@
       <form id="form-webpw" class="card">
         <h3>WebUI 登录密码</h3>
         <label>当前密码<input type="password" id="wp-current" required autocomplete="current-password"></label>
-        <label>新密码<input type="password" id="wp-new" required autocomplete="new-password" minlength="12"></label>
+        <label>新密码<input type="password" id="wp-new" required autocomplete="new-password"></label>
         <label>确认新密码<input type="password" id="wp-confirm" required autocomplete="new-password"></label>
         <button type="submit">修改密码</button>
-        <p class="hint">至少 12 位。修改后其他设备的登录状态会被作废。</p>
+        <p class="hint">长度不限。修改后其他设备的登录状态会被作废。</p>
       </form>
 
       <form id="form-gamepw" class="card">
@@ -114,6 +114,7 @@
   </main>
   <p id="toast" class="toast" hidden role="status" aria-live="polite"></p>
 </div>
+<script src="/labels.js"></script>
 <script src="/log.js"></script>
 <script src="/app.js"></script>
 </body>

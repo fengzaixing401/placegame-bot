@@ -101,9 +101,11 @@ export class SettingsStore {
     return !!this.#read(KEY_WEB_PASSWORD);
   }
 
+  // 长度不设下限(用户明确要求可随意设置)。空串仍要拒:那等于没有密码,
+  // 而 verifyWebPassword 对空串会走到 scrypt 比较,任何人提交空密码都能进来。
   setWebPassword(password) {
-    if (typeof password !== "string" || password.length < 12) {
-      throw Object.assign(new Error("WebUI 密码至少 12 个字符"), { status: 400 });
+    if (typeof password !== "string" || password.length === 0) {
+      throw Object.assign(new Error("WebUI 密码不能为空"), { status: 400 });
     }
     this.#write(KEY_WEB_PASSWORD, hashPassword(password));
   }

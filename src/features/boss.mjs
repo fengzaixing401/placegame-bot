@@ -1,24 +1,46 @@
 import { unwrap, pickList, pickKey } from "../util.mjs";
 import { dynamicView } from "./collect.mjs";
+import { difficulty as difficultyLabel } from "../labels.mjs";
 
 // 首领类型(dynamic-view 的 data.bosses[].type)
 export const BOSS_TYPE = { PERSONAL: "personal", MAP: "map", WORLD: "world" };
 
-// 能否挑战:真实字段是 available(布尔)与 blockedReason。
-// 源码中不存在 blocked / challengeable / assistable / remainingAttempts 这些字段。
-export function isChallengeable(row) {
-  if (!row) return false;
-  if (row.available === false) return false;
-  const left = row.remainingAttemptCount;
-  if (typeof left === "number" && left <= 0) return false;
-  return true;
+// 免费/门票次数。真号实测:只有 personal 类型的首领带 personalAttemptPool,
+// 且它挂在每个首领对象上,不在玩家快照里 —— 早先按 player.personalBossAttempts 读恒为 null,
+// 使"不允许用门票"的闸门从未真正生效过。
+// {freeRemaining, freeLimit, ticketUsed, ticketLimit, nextTicketCost}
+export function attemptPool(row) {
+  const pool = row?.personalAttemptPool;
+  return pool && typeof pool === "object" ? pool : null;
 }
 
-export function blockedReason(row) {
+// 能否挑战:真实字段只有 blockedReason(空串=可挑战)。
+// 顶层没有 available,也没有 remainingAttemptCount —— 21 个首领的字段全集里都不存在,
+// 早先读这两个等于恒真,拿不到任何拦截效果。
+export function isChallengeable(row) {
+  return blockedReason(row) === null;
+}
+
+// 挑战闸门。难度可选:每个难度档各有自己的 blockedReason,选了哪档就要看哪档,
+// 只看行级会漏掉"困难档材料不够"这类只在档位上体现的阻挡。
+export function blockedReason(row, difficulty) {
   if (!row) return "首领不存在";
-  // 必须用 ||:服务端用空字符串表示"无阻挡原因",?? 不会兜底,调用方 if (reason) 会把它当成可挑战
-  if (row.available === false) return row.blockedReason || "服务端标记不可挑战";
-  if (typeof row.remainingAttemptCount === "number" && row.remainingAttemptCount <= 0) return "挑战次数已用尽";
+  // 服务端用空字符串表示"无阻挡原因",故只在非空时当作被阻挡
+  if (typeof row.blockedReason === "string" && row.blockedReason.trim() !== "") return row.blockedReason;
+  if (difficulty) {
+    const perDiff = difficultyDetail(row, difficulty)?.blockedReason;
+    if (typeof perDiff === "string" && perDiff.trim() !== "") return perDiff;
+  }
+  // 个人首领:免费次数与门票都空了就是真打不了,服务端此时不给 blockedReason
+  const pool = attemptPool(row);
+  if (pool) {
+    const free = typeof pool.freeRemaining === "number" ? pool.freeRemaining : null;
+    const ticketLeft =
+      typeof pool.ticketLimit === "number" && typeof pool.ticketUsed === "number"
+        ? pool.ticketLimit - pool.ticketUsed
+        : null;
+    if (free !== null && free <= 0 && ticketLeft !== null && ticketLeft <= 0) return "今日免费次数与门票次数都已用尽";
+  }
   return null;
 }
 
@@ -28,40 +50,86 @@ export async function listBosses(api, { type } = {}) {
   return type ? bosses.filter((b) => b.type === type) : bosses;
 }
 
-// 一次 dynamic-view 同时取首领列表与次数信息,避免为了读门票再请求一遍。
+// 一次 dynamic-view 取首领列表。次数信息在每个个人首领自己的 personalAttemptPool 里,
+// 玩家快照里没有汇总字段,所以不再单独抽一份出来。
 export async function bossSnapshot(api) {
   const view = await dynamicView(api);
-  const holder = view?.player ?? view?.character ?? view?.profile ?? view ?? {};
-  return {
-    bosses: pickList(view?.bosses, "bosses"),
-    personalAttempts: holder.personalBossAttempts ?? null,
-    mapAttempts: holder.bossAttempts ?? null
-  };
+  return { bosses: pickList(view?.bosses, "bosses") };
 }
 
-// 剩余免费次数。字段名服务端可能用 freeRemaining / remainingFree,取首个是数字的。
-export function freeAttemptsLeft(attempts) {
-  if (!attempts || typeof attempts !== "object") return null;
-  for (const k of ["freeRemaining", "remainingFree", "freeLeft", "free"]) {
-    if (typeof attempts[k] === "number") return attempts[k];
-  }
-  return null;
-}
-
-// 难度取值在任何静态来源里都查不到(HAR 无命中,CLI 只有 "normal" 默认值),
-// 只能从真实列表里发现:扫每行带 difficult 字样的数组字段。查不到就只有 "normal" 可信。
-export function difficultyOptions(rows = []) {
-  const found = new Set();
+// 今日剩余免费次数。取所有个人首领里的最小值。
+// 实测样本里 9 个首领的池值完全一致(5/5、门票用 0),但那是满值状态 ——
+// 满值下"全账号共享一个池"与"每个首领各有一池"表现相同,无从区分。
+// 取最小值在两种模型下都不会超额:真共享则最小值就是池值;真独立则宁可早停也不多扣门票。
+export function freeAttemptsLeft(rows = []) {
+  let min = null;
   for (const row of rows) {
-    for (const [k, v] of Object.entries(row ?? {})) {
-      if (!/difficult/i.test(k) || !Array.isArray(v)) continue;
-      for (const item of v) {
-        const key = typeof item === "string" ? item : item?.key ?? item?.value ?? item?.difficulty;
-        if (key) found.add(String(key));
-      }
+    const pool = attemptPool(row);
+    if (!pool || typeof pool.freeRemaining !== "number") continue;
+    min = min === null ? pool.freeRemaining : Math.min(min, pool.freeRemaining);
+  }
+  return min;
+}
+
+// 难度选项。真号实测每个首领自带 difficultyOptions: [{key,name}] —— 三类首领都有,
+// 取值 normal 普通 / hard 困难 / nightmare 噩梦。名字直接用服务端给的,不本地翻译。
+export function difficultyOptions(rows = []) {
+  const found = new Map();
+  for (const row of rows) {
+    for (const item of row?.difficultyOptions ?? []) {
+      const key = typeof item === "string" ? item : item?.key ?? item?.value ?? item?.difficulty;
+      if (!key || found.has(String(key))) continue;
+      found.set(String(key), { key: String(key), name: item?.name ?? String(key) });
     }
   }
-  return [...found];
+  return [...found.values()];
+}
+
+// 某个首领某一难度档的完整信息。每档自带胜率、消耗与阻挡原因,
+// 与游戏内难度选择界面同源 —— 面板据此显示,不必额外调 preview。
+export function difficultyDetail(row, difficulty = "normal") {
+  return (row?.difficultyOptions ?? []).find((o) => (o?.key ?? o) === difficulty) ?? null;
+}
+
+// 该档要扣几张门票。真号实测按首领类型分野:
+//   个人首领 三档全是 0 —— 它扣的是 personalAttemptPool 的免费次数/门票池,不走这个字段
+//   地图/世界 普通 0 / 困难 1 / 噩梦 2
+// 所以"不允许用门票"必须同时管这两条路径:只看 personalAttemptPool 的旧写法,
+// 在选困难档打地图首领时形同虚设,门票照扣。
+export function ticketCost(row, difficulty = "normal") {
+  const cost = difficultyDetail(row, difficulty)?.ticketCost;
+  return typeof cost === "number" ? cost : null;
+}
+
+// 挑战参数的可选项(技能/战术/词缀/目标部位)。服务端在每个首领的 challengeOptions 里
+// 带全了中文名,页面据此渲染下拉,用户不必手写 key。
+export function challengeOptions(rows = []) {
+  const out = { skills: [], buffs: [], affixes: [], targetSlots: [] };
+  const seen = { skills: new Set(), buffs: new Set(), affixes: new Set(), targetSlots: new Set() };
+  for (const row of rows) {
+    const co = row?.challengeOptions;
+    if (!co || typeof co !== "object") continue;
+    for (const group of ["skills", "buffs", "affixes"]) {
+      for (const item of co[group] ?? []) {
+        const key = typeof item === "string" ? item : item?.key;
+        if (!key || seen[group].has(String(key))) continue;
+        seen[group].add(String(key));
+        out[group].push({
+          key: String(key),
+          name: item?.name ?? String(key),
+          ...(typeof item?.level === "number" ? { level: item.level } : {}),
+          ...(typeof item?.rewardMultiplier === "number" ? { rewardMultiplier: item.rewardMultiplier } : {})
+        });
+      }
+    }
+    for (const s of co.targetSlots ?? []) {
+      const key = typeof s === "string" ? s : s?.key;
+      if (!key || seen.targetSlots.has(String(key))) continue;
+      seen.targetSlots.add(String(key));
+      out.targetSlots.push(String(key));
+    }
+  }
+  return out;
 }
 
 export async function worldStatus(api) {
@@ -143,8 +211,14 @@ function winGate(forecast, { minWinChance = 0, requirePredictedWin = false }) {
 // 地图首领与个人首领分开控制:个人首领必须 challengePersonal=true 且显式列出目标,
 // 否则一次自动运行就会把免费次数打光甚至扣掉门票。
 export async function runBosses(api, { types, rules = {}, maxChallenges = 5, dryRun = false } = {}) {
+  // 个人首领与地图首领各有自己的难度设置:两类首领在页面上是两个面板,
+  // 共用一个 difficulty 会让其中一个面板的选择被另一个悄悄改掉。
+  const difficultyFor = (boss) =>
+    (boss?.type === BOSS_TYPE.PERSONAL ? rules.personalDifficulty : rules.difficulty) ?? "normal";
+
   const out = {
     difficulty: rules.difficulty ?? "normal",
+    personalDifficulty: rules.personalDifficulty ?? "normal",
     gate: {
       minWinChance: rules.minWinChance ?? 0,
       requirePredictedWin: rules.requirePredictedWin === true,
@@ -156,10 +230,11 @@ export async function runBosses(api, { types, rules = {}, maxChallenges = 5, dry
     errors: []
   };
 
-  const allowPersonal = rules.challengePersonal === true;
-  const activeTypes = types ?? (allowPersonal ? [BOSS_TYPE.MAP, BOSS_TYPE.PERSONAL] : [BOSS_TYPE.MAP]);
-  const { bosses, personalAttempts } = await bossSnapshot(api);
-  out.freeAttemptsLeft = freeAttemptsLeft(personalAttempts);
+  // 调用方显式指定类型(三个动作各打一类)。缺省只打地图首领 ——
+  // 个人首领次数有限,绝不能被"没指定类型"顺带打掉。
+  const activeTypes = types ?? [BOSS_TYPE.MAP];
+  const { bosses } = await bossSnapshot(api);
+  out.freeAttemptsLeft = freeAttemptsLeft(bosses);
 
   const mapWanted = new Set([].concat(rules.mapBosses ?? []));
   const personalWanted = new Set([].concat(rules.personalBosses ?? []));
@@ -170,7 +245,6 @@ export async function runBosses(api, { types, rules = {}, maxChallenges = 5, dry
     if (!activeTypes.includes(boss.type)) continue;
     if (boss.type === BOSS_TYPE.PERSONAL) {
       // 个人首领只打点名的:留空不等于"全打",否则等于没有设置过程
-      if (!allowPersonal) continue;
       if (personalWanted.size === 0) {
         out.skipped.push({ bossKey: pickKey(boss), name: boss.name, reason: "未在 personalBosses 中列出" });
         continue;
@@ -185,39 +259,71 @@ export async function runBosses(api, { types, rules = {}, maxChallenges = 5, dry
   for (const boss of candidates) {
     if (out.attempted.length >= maxChallenges) break;
     const key = pickKey(boss);
-    const label = { bossKey: key, name: boss.name };
-    const reason = blockedReason(boss);
+    const difficulty = difficultyFor(boss);
+    // difficulty 记进每条结果:两类首领难度不同,日志里不写清楚就分不出这一场打的是哪档
+    const label = { bossKey: key, name: boss.name, difficulty };
+    const reason = blockedReason(boss, difficulty);
     if (reason) {
       out.skipped.push({ ...label, reason });
       continue;
     }
 
-    // 门票闸门:接口没有门票参数,免费次数用尽后服务端自动扣票,只能在这里提前拦下
-    if (boss.type === BOSS_TYPE.PERSONAL && !out.gate.useTickets) {
-      const left = out.freeAttemptsLeft;
-      if (left === null) {
-        out.skipped.push({ ...label, reason: "读不到免费次数,已按不使用门票跳过" });
+    // 门票闸门。两条独立的扣票路径都要管:
+    //   ① 难度档自带 ticketCost(地图/世界首领的困难 1 张、噩梦 2 张)—— 权威字段,优先看
+    //   ② 个人首领的免费次数用尽后服务端自动扣 personalAttemptPool 的门票,接口没有开关,
+    //      只能在这里提前停手
+    if (!out.gate.useTickets) {
+      const cost = ticketCost(boss, difficulty);
+      // 原因是给人看的,难度写游戏内档位名。优先用服务端给的 name(它才是游戏里显示的那个),
+      // 读不到该档时回落到本地表 —— 恰好 cost===null 就是读不到那档的情形。
+      const dName = difficultyDetail(boss, difficulty)?.name ?? difficultyLabel(difficulty);
+      if (cost === null) {
+        out.skipped.push({ ...label, reason: `读不到「${dName}」难度的门票消耗,已按不使用门票跳过` });
         continue;
       }
-      if (left <= 0) {
-        out.skipped.push({ ...label, reason: "免费次数已用尽,且未允许使用门票" });
+      if (cost > 0) {
+        out.skipped.push({ ...label, reason: `「${dName}」难度要扣 ${cost} 张门票,未允许使用门票` });
         continue;
+      }
+      if (attemptPool(boss)) {
+        const left = out.freeAttemptsLeft;
+        if (left === null) {
+          out.skipped.push({ ...label, reason: "读不到免费次数,已按不使用门票跳过" });
+          continue;
+        }
+        if (left <= 0) {
+          out.skipped.push({ ...label, reason: "免费次数已用尽,且未允许使用门票" });
+          continue;
+        }
       }
     }
 
+    // 发给服务端的难度必须是这一类首领自己的那档,不能直接透传 rules.difficulty
+    const bossRules = { ...rules, difficulty };
+
     try {
       if (dryRun) {
-        const result = await preview(api, key, rules);
+        const result = await preview(api, key, bossRules);
         out.attempted.push({ ...label, dryRun: true, forecast: readForecast(result), result });
         continue;
       }
 
       let forecast = null;
       if (out.gate.minWinChance > 0 || out.gate.requirePredictedWin) {
+        // 先用难度档自带的胜率筛一遍:这是游戏内难度界面显示的那个数,
+        // 明显不达标就不必再花一次 preview 请求。
+        const baseline = readForecast(difficultyDetail(boss, difficulty));
+        const preRejected = winGate(baseline, out.gate);
+        if (preRejected) {
+          out.skipped.push({ ...label, reason: preRejected, forecast: baseline, source: "难度档预估" });
+          continue;
+        }
+
+        // 档位胜率不含技能/战术/词缀的影响,过了初筛仍要按实际参数再确认一次。
         // 闸门本身失败就不打:preview 拿不到结论时挑战等于盲赌
         let previewed;
         try {
-          previewed = await preview(api, key, rules);
+          previewed = await preview(api, key, bossRules);
         } catch (err) {
           out.skipped.push({ ...label, reason: `预览失败,未挑战:${err.message}` });
           continue;
@@ -230,7 +336,7 @@ export async function runBosses(api, { types, rules = {}, maxChallenges = 5, dry
         }
       }
 
-      const result = await challenge(api, key, rules);
+      const result = await challenge(api, key, bossRules);
       out.attempted.push({ ...label, dryRun: false, forecast, win: result?.battle?.win, result });
       if (boss.type === BOSS_TYPE.PERSONAL && typeof out.freeAttemptsLeft === "number") {
         out.freeAttemptsLeft -= 1;
@@ -250,49 +356,58 @@ export async function runBosses(api, { types, rules = {}, maxChallenges = 5, dry
   return out;
 }
 
-// 世界首领:窗口内协助 + 领奖。status 为 closed 时直接跳过,不浪费请求。
-export async function runWorldBoss(api, { rules = {}, assistOnly = false } = {}) {
-  const out = { status: null, assisted: [], attempted: [], claimed: null, errors: [] };
+// 协作闸门。世界首领能不能协作只看 assistBlockedReason,与挑战用的 blockedReason 是两个字段:
+// 真号实测 7 个世界首领 blockedReason 全为空(看着都能打)、assistBlockedReason 全是
+// 「当前世界首领场次未开放或已经结束。」—— 拿 blockedReason 判协作等于恒放行。
+export function assistBlockedReason(row) {
+  if (!row) return "首领不存在";
+  const reason = row.assistBlockedReason;
+  if (typeof reason === "string" && reason.trim() !== "") return reason;
+  const inst = row.worldInstance;
+  if (inst && typeof inst === "object") {
+    const left = inst.remainingAttemptCount;
+    if (typeof left === "number" && left <= 0) return "本场次协作次数已用尽";
+  }
+  return null;
+}
+
+// ⑤ 世界首领:只参与协作讨伐 + 领奖,不主动挑战。
+// 世界首领是全服共同消耗一个血条的场次战,个人主攻既无难度可选也无"胜率"可言;
+// 服务端虽然也接受 challenge,但那会按困难/噩梦档扣掉门票,与"只参与协作"的本意相反。
+export async function runWorldBoss(api, { rules = {} } = {}) {
+  const out = { status: null, assisted: [], skipped: [], claimed: null, errors: [] };
   out.status = await worldStatus(api).catch((err) => {
     out.errors.push({ step: "worldStatus", error: err.message });
     return null;
   });
-  // 实测 /api/boss/world-status 返回的是实例数组,不是单个对象 —— 旧写法读 out.status.status
-  // 对数组恒为 undefined,这个「窗口外跳过」从来没生效过。
-  // 只在确实读到状态、且每一项都明确是 closed 时才跳:读取失败(null)照旧尝试,
-  // 出现没见过的状态值也照旧尝试,免得因为猜错状态词把整轮跳掉。
-  const instances = Array.isArray(out.status) ? out.status : out.status ? [out.status] : [];
-  if (instances.length > 0 && instances.every((s) => s?.status === "closed")) {
-    return { ...out, skipped: "世界首领未开放" };
-  }
 
   const bosses = await listBosses(api, { type: BOSS_TYPE.WORLD });
+  const wanted = new Set([].concat(rules.worldBosses ?? []));
   for (const boss of bosses) {
     const key = pickKey(boss);
-    // 与地图首领记同一套字段:name 供页面显示中文名(否则日志里只剩 bossKey 裸键),
-    // win 供日志判定胜负 —— 战斗详情深埋在 result 里,落库裁剪时经常被砍掉。
+    // 名单为空表示"全部参与";点了名就只协作名单里那几个
+    if (wanted.size > 0 && !wanted.has(key) && !wanted.has(boss.name)) continue;
+    // name 供页面显示中文名(否则日志里只剩 bossKey 裸键)
     const label = { bossKey: key, name: boss.name };
+    const reason = assistBlockedReason(boss);
+    if (reason) {
+      out.skipped.push({ ...label, reason });
+      continue;
+    }
     try {
-      if (assistOnly) {
-        out.assisted.push({ ...label, result: await assist(api, key) });
-      } else {
-        const reason = blockedReason(boss);
-        if (reason) {
-          out.assisted.push({ ...label, fallback: "assist", reason, result: await assist(api, key) });
-        } else {
-          const result = await challenge(api, key, rules);
-          out.attempted.push({ ...label, win: result?.battle?.win, result });
-        }
-      }
+      out.assisted.push({ ...label, result: await assist(api, key) });
     } catch (err) {
       out.errors.push({ ...label, error: err.message });
     }
   }
 
-  try {
-    out.claimed = await claimReward(api);
-  } catch (err) {
-    out.errors.push({ step: "claimReward", error: err.message });
+  // 一个都没协作成功就不必领奖,省一次请求
+  if (out.assisted.length > 0) {
+    try {
+      out.claimed = await claimReward(api);
+    } catch (err) {
+      out.errors.push({ step: "claimReward", error: err.message });
+    }
   }
   return out;
 }
