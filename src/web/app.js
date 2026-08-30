@@ -141,7 +141,7 @@ for (const tab of document.querySelectorAll(".tab")) {
 // preview: 该操作支持 dryRun,面板里给一颗「只预览」。
 // job 是日志渲染器的键,与排程任务、任务记录里的键同名,渲染逻辑只此一份。
 const ACTIONS = [
-  { path: "collect", job: "collect", label: "收挂机收益", panel: null, note: "把挂机攒下的经验金币收进账。有冒险事件会顺手选第一个选项。" },
+  { path: "collect", job: "collect", label: "收挂机收益", panel: "collect", note: "把挂机攒下的经验金币收进账。有冒险事件会顺手选第一个选项。" },
   { path: "inventory/decompose", job: "inventory", label: "背包分解", panel: "inventory", preview: true },
   { path: "profession/settle", job: "profession", label: "副职结算", panel: "profession" },
   { path: "guild/daily", job: "guild", label: "公会日常", panel: "guild" },
@@ -268,9 +268,6 @@ function bossRowHint(r, difficulty) {
   return bits.join(" · ");
 }
 
-// 首领多选。allowAll=true 时提供"全部可挑战的"开关(空数组语义);
-// 个人首领没有这个开关 —— 空数组就是不打,这是刻意的。
-// describe 给每行算说明文字;换难度后调 refresh() 重算,不必重建整个面板。
 // 首领多选。allowAll=true 时提供"全部可挑战的"开关(空数组语义);
 // 个人首领没有这个开关 —— 空数组就是不打,这是刻意的。
 // describe 逐行生成说明文字,配合 refresh() 让换难度后的胜率/消耗跟着重算。
@@ -440,72 +437,79 @@ function itemRow(init, { placeholder, items, amountWord = "持有", missingWord 
   };
 }
 
-// 品质多选。显示游戏内的中文档位名,存进规则的仍是服务端认的内部值(white/green/…)。
-// 映射表只有 src/labels.mjs 一份,经 /labels.js 挂到 window.PGLabels。
-function fQualities(value, qualities) {
+// 复选清单。存进规则的仍是服务端认的英文键,页面只显示中文。
+//
+// keys 来自当前背包,但**已选的取值必须始终有复选框** —— 背包里此刻没有这一档
+// 的样本时,原先整行都不渲染,于是规则里存着的档位在页面上凭空消失:看不到自己
+// 选了什么,更没法取消。同一个坑 fDifficulty 与副职动作那边也各修过一次
+// (见「游戏未返回此档」「不在可选列表」),这里是第三处。
+// countOf 返回件数,null = 不知道(没读到背包),0 = 读到了但背包里没有 —— 两者措辞不同。
+function fChecklist(labelText, value, keys, { toLabel, countOf, hint, wrap = false } = {}) {
   const selected = new Set((value ?? []).map(String));
+  const rows = [...new Set([...(Array.isArray(keys) ? keys : []).map(String), ...selected])];
   const boxes = [];
-  const list = el("div", { className: "checklist" });
-  const rows = PGL.sortQualities(Array.isArray(qualities) ? qualities : [], (q) => String(q.quality));
-  if (!rows.length) {
-    // 没读到背包就退回文本框,不编枚举
-    const input = el("input", {
-      type: "text",
-      value: [...selected].join(","),
-      placeholder: "如 green,blue",
-      spellcheck: false
-    });
-    return {
-      node: field("可分解品质", input, "没读到背包,只能手填游戏内部取值,逗号分隔。留空 = 不按品质筛"),
-      read: () => input.value.split(",").map((s) => s.trim()).filter(Boolean)
-    };
-  }
-  for (const q of rows) {
-    const key = String(q.quality);
+  const list = el("div", { className: wrap ? "checklist wrap" : "checklist" });
+  for (const key of rows) {
     const box = el("input", { type: "checkbox", checked: selected.has(key) });
     boxes.push([box, key]);
+    const n = countOf ? countOf(key) : null;
+    const suffix = n === null || n === undefined ? "" : n > 0 ? `(${n} 件)` : "(背包里没有)";
     list.append(
-      el(
-        "label",
-        { className: "check-item" },
-        box,
-        el("span", { textContent: `${PGL.quality(key)}(${q.count} 件)` })
-      )
+      el("label", { className: "check-item" }, box, el("span", { textContent: `${toLabel ? toLabel(key) : key}${suffix}` }))
     );
   }
   return {
-    node: field("可分解品质", list, "档位名与游戏内一致,件数取自当前背包。留空 = 不按品质筛"),
+    node: field(labelText, list, hint),
     read: () => boxes.filter(([b]) => b.checked).map(([, v]) => v)
   };
 }
 
-// 保留属性多选。属性名同样取自真实背包,不写死那 20 个词条。
+// 品质多选。七个档位是固定枚举(已由游戏客户端的品质表确证),所以即便读不到背包
+// 也照样给全七档,不退化成让人手填 white/green 的文本框 —— 那正是要消掉的英文键。
+function fQualities(value, qualities) {
+  const bag = Array.isArray(qualities) ? qualities : [];
+  const counts = new Map(bag.map((q) => [String(q.quality), typeof q.count === "number" ? q.count : null]));
+  const keys = PGL.sortQualities([...new Set([...PGL.tables.QUALITY_ORDER, ...counts.keys()])], (k) => k);
+  return fChecklist("可分解品质", value, keys, {
+    toLabel: (k) => PGL.quality(k),
+    countOf: (k) => (bag.length ? counts.get(k) ?? 0 : null),
+    hint: bag.length
+      ? "档位名与游戏内一致,件数取自当前背包。留空 = 不按品质筛"
+      : "没读到背包,件数未知。档位名与游戏内一致。留空 = 不按品质筛"
+  });
+}
+
+// 保留属性多选。20 个词条也是固定枚举,读不到背包时同样给全,只是不显示件数。
 function fAttrs(value, attrKeys) {
-  const selected = new Set((value ?? []).map(String));
-  const rows = Array.isArray(attrKeys) ? attrKeys : [];
-  if (!rows.length) {
-    const input = el("input", {
-      type: "text",
-      value: [...selected].join(","),
-      placeholder: "如 attack,critical",
-      spellcheck: false
-    });
-    return {
-      node: field("命中这些属性时保留", input, "没读到背包,手填属性名,逗号分隔"),
-      read: () => input.value.split(",").map((s) => s.trim()).filter(Boolean)
-    };
-  }
-  const boxes = [];
-  const list = el("div", { className: "checklist wrap" });
-  for (const k of rows) {
-    const box = el("input", { type: "checkbox", checked: selected.has(String(k)) });
-    boxes.push([box, String(k)]);
-    list.append(el("label", { className: "check-item" }, box, el("span", { textContent: String(k) })));
-  }
-  return {
-    node: field("命中这些属性时保留", list, "属性名取自当前背包里的装备词条"),
-    read: () => boxes.filter(([b]) => b.checked).map(([, v]) => v)
-  };
+  const bag = (Array.isArray(attrKeys) ? attrKeys : []).map(String);
+  const keys = [...new Set([...Object.keys(PGL.tables.EQUIP_ATTR), ...bag])];
+  return fChecklist("命中这些属性时保留", value, keys, {
+    wrap: true,
+    toLabel: (k) => PGL.equipAttr(k),
+    hint: bag.length
+      ? "属性名与游戏内一致。命中任一项就不拆,勾得越多留得越多"
+      : "没读到背包,列的是全部已知词条。命中任一项就不拆"
+  });
+}
+
+// 只读现状块。面板上「执行前先让人看见当前状态」的统一写法:
+// 挂机攒了多久、活跃度差几点。lines 里每项 {text, kind},kind 复用日志的颜色类。
+// 读不到就不给这一块 —— 不拿空骨架占位。
+function fStatus(titleText, lines, hint) {
+  const rows = (lines ?? []).filter((x) => x && x.text);
+  if (!rows.length) return null;
+  const list = el(
+    "div",
+    { className: "checklist" },
+    ...rows.map((x) => el("div", { className: `log-line${x.kind ? ` log-${x.kind}` : ""}`, textContent: x.text }))
+  );
+  return el(
+    "div",
+    { className: "subfield" },
+    el("span", { className: "sub-title", textContent: titleText }),
+    list,
+    ...(hint ? [el("p", { className: "hint", textContent: hint })] : [])
+  );
 }
 
 // ---- 各操作的执行面板。返回 {node, read} —— read() 出的就是本次请求的 args ----
@@ -574,15 +578,33 @@ function panelProfession(r, opts) {
   const profRows = opts?.professions ?? [];
   const current = opts?.selectedProfession ?? null;
   const profName = (key) => profRows.find((p) => p.key === key)?.name ?? key;
-  const prof = fSelect(
-    "副职",
-    r.profession?.professionKey,
-    [
-      ["", current ? `不切换(当前:${profName(current)})` : "不切换"],
-      ...profRows.map((p) => [p.key, p.level === null ? p.name : `${p.name}(${p.level} 级)`])
-    ],
-    "留「不切换」则沿用游戏内当前副职"
-  );
+
+  // 专精是游戏侧的一次性永久选择,不是可来回切的开关:客户端自己弹
+  // 「确定永久专精X?…且不可更改」,选定后按钮整块消失。所以已锁定时
+  // 这里不给下拉 —— 给了也只是让人点一遍再吃一个服务端报错。
+  // 未锁定时默认「不专精」,要专精得自己挑,页面不替人做这个不可逆决定。
+  const prof = current
+    ? {
+        node: fStatus(
+          "副职专精",
+          [
+            { text: `已永久专精:${profName(current)}`, kind: "ok" },
+            { text: "游戏侧不可更改,其他副职仍能按基础效率使用", kind: "muted" }
+          ]
+        ),
+        // 锁定后写空串而不是留旧值:规则里若存着别的键,排程每轮都会去 POST 一次
+        // 注定失败的专精请求。
+        read: () => ""
+      }
+    : fSelect(
+        "副职专精",
+        r.profession?.professionKey,
+        [
+          ["", "不专精(推荐)"],
+          ...profRows.map((p) => [p.key, p.level === null ? p.name : `${p.name}(${p.level} 级)`])
+        ],
+        "一次性永久选择,选定后游戏侧不可更改。只想结算和排队就留「不专精」"
+      );
   const actions = opts?.professionActions ?? [];
   const enqueue = fRows(
     "结算后排队",
@@ -805,28 +827,94 @@ function panelBossWorld(r, opts) {
   };
 }
 
-function panelActivity(r) {
+function panelActivity(r, opts) {
   const boxes = [
     ["quests", fBool("任务奖励", r.activity?.quests)],
     ["achievements", fBool("成就奖励", r.activity?.achievements)],
-    ["daily", fBool("每日活跃", r.activity?.daily)],
+    ["daily", fBool("活跃宝箱", r.activity?.daily, "按当前活跃度自动领所有已达标又没领过的箱子")],
     ["signIn", fBool("每日签到", r.activity?.signIn)],
     ["mail", fBool("邮件", r.activity?.mail)],
     ["codex", fBool("图鉴奖励", r.activity?.codex === true)]
   ];
+
+  // 活跃宝箱现状。阈值是客户端常量,进度由后端按 bootstrap.daily 现算。
+  const ap = opts?.activity ?? null;
+  const questRows = (ap?.quests ?? []).map((q) => ({
+    text: `${q.done ? "✓" : "·"} ${q.name} ${q.current}/${q.target}`,
+    kind: q.done ? "ok" : "muted"
+  }));
+  const tierRows = (ap?.tiers ?? []).map((t) => {
+    const rewards = (t.rewards ?? []).join("、");
+    if (t.claimed) return { text: `${t.name}(${t.point} 点):今天已领过`, kind: "muted" };
+    if (t.claimable) return { text: `${t.name}(${t.point} 点):可领 —— ${rewards}`, kind: "ok" };
+    return { text: `${t.name}(${t.point} 点):还差 ${t.point - (ap?.score ?? 0)} 点 —— ${rewards}`, kind: "muted" };
+  });
+  const head = ap
+    ? [{ text: `当前活跃度 ${ap.score} 点(七项日常完成 ${ap.doneCount}/${ap.questTotal},每项 20 点,上限 100)`, kind: ap.claimable?.length ? "ok" : "muted" }]
+    : [];
+  const status = ap
+    ? fStatus("活跃宝箱", [...head, ...tierRows, ...questRows],
+        "活跃度上限 100 而七项日常共值 140,做满五项即可拿全五档。勾了「活跃宝箱」就会自动领上面标「可领」的。")
+    : el("p", { className: "hint", textContent: "读不到活跃度进度(游戏接口没返回),仍可执行 —— 后端会在执行时自己算一次。" });
+
   const payload = () => {
     const out = {};
     for (const [k, f] of boxes) out[k] = f.read();
     return out;
   };
   return {
-    node: el("div", { className: "op-form" }, ...boxes.map(([, f]) => f.node)),
+    node: el("div", { className: "op-form" }, ...(status ? [status] : []), ...boxes.map(([, f]) => f.node)),
     read: payload,
     toRules: () => ({ activity: payload() })
   };
 }
 
+// R11:挂机收益。执行前先显示攒了多久、预计到手多少 —— 原先点一下就直接收,
+// 人根本不知道这次收的是 3 分钟还是 11 小时的量。
+function panelCollect(_r, opts) {
+  const idle = opts?.idle ?? null;
+  const num = (v) => (typeof v === "number" && Number.isFinite(v) ? v.toLocaleString("zh-CN") : null);
+  const rows = [];
+  if (idle) {
+    if (typeof idle.validSeconds === "number") {
+      const h = Math.floor(idle.validSeconds / 3600);
+      const m = Math.floor((idle.validSeconds % 3600) / 60);
+      const span = h ? `${h} 小时${m ? ` ${m} 分` : ""}` : `${m} 分`;
+      // 挂机上限 12 小时,满了之后再挂也不涨 —— 快满时要让人看见
+      const full = idle.validSeconds >= 11 * 3600;
+      rows.push({ text: `已挂机 ${span}${full ? "(接近 12 小时上限,再挂会溢出)" : ""}`, kind: full ? "warn" : "ok" });
+    }
+    if (typeof idle.efficiency === "number") rows.push({ text: `挂机效率 ${num(idle.efficiency)} 倍`, kind: "muted" });
+    const gain = [
+      typeof idle.exp === "number" ? `经验 ${num(idle.exp)}` : null,
+      typeof idle.gold === "number" ? `金币 ${num(idle.gold)}` : null,
+      typeof idle.killCount === "number" ? `击杀 ${num(idle.killCount)}` : null
+    ].filter(Boolean);
+    if (gain.length) rows.push({ text: `预计到手:${gain.join(" · ")}`, kind: "ok" });
+    if (typeof idle.dropCount === "number" && idle.dropCount > 0) rows.push({ text: `掉落 ${num(idle.dropCount)} 件装备`, kind: "muted" });
+    if (typeof idle.rareCoinFragments === "number" && idle.rareCoinFragments > 0) {
+      rows.push({ text: `稀有币碎片 ${num(idle.rareCoinFragments)}`, kind: "muted" });
+    }
+    const fb = idle.foodBonus;
+    if (fb?.name) {
+      const covered = typeof fb.coveredSeconds === "number" ? `,覆盖 ${Math.round(fb.coveredSeconds / 60)} 分钟` : "";
+      rows.push({ text: `${fb.name} 生效中${covered}`, kind: "muted" });
+    }
+  }
+  const status = rows.length
+    ? fStatus("当前挂机", rows, "这是收取前的概览,数值由游戏返回。真正到手多少以执行后的日志为准。")
+    : el("p", { className: "hint", textContent: "读不到挂机概览(游戏接口没返回或此刻没有可收的量),仍可点执行试一次。" });
+
+  // 收益本身没有可调参数:冒险事件由后端自动选第一个选项。
+  // 这个面板存在的意义只是「先看清攒了多久再决定收不收」,所以不给 toRules。
+  return {
+    node: el("div", { className: "op-form" }, status),
+    read: () => ({})
+  };
+}
+
 const PANELS = {
+  collect: panelCollect,
   inventory: panelInventory,
   profession: panelProfession,
   guild: panelGuild,
@@ -1000,6 +1088,9 @@ function accountCard(acc) {
       } else if (opts.errors?.length) {
         body.append(el("p", { className: "warn", textContent: `部分选项读取失败:${opts.errors.join("; ")}` }));
       }
+      // note 与面板并存:collect 有面板但也有「冒险事件会选第一个选项」这种
+      // 必须交代的行为,只在无面板时显示会把它藏起来。
+      if (act.note) body.append(el("p", { className: "hint", textContent: act.note }));
       panel = PANELS[act.panel](effective, opts ?? {});
       body.append(panel.node);
     } else {

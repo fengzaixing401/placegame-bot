@@ -96,21 +96,26 @@ export function buildActions(config) {
         signIn: args?.signIn ?? r.signIn,
         mail: args?.mail ?? r.mail,
         codex: args?.codex ?? r.codex ?? false,
-        dailyPoints: args?.dailyPoints ?? r.dailyPoints ?? []
+        // null = 交给 claimAll 自己按活跃点解档;显式传数组才按名单领(空数组 = 一档都不领)。
+        dailyPoints: args?.dailyPoints ?? r.dailyPoints ?? null
       });
     },
 
     // 只读:给 WebUI 表单喂真实可选项,避免让用户手写 key。
     // 单项失败不影响其余,表单能渲染多少算多少。
     async options(api) {
-      const [snapshot, bag, equipment, profView, guildView] = await Promise.all([
+      const [snapshot, bag, equipment, profView, guildView, activityView, idleView] = await Promise.all([
         boss.bossSnapshot(api).catch((err) => ({ error: err.message, bosses: [] })),
         guild.donatableItems(api).catch((err) => ({ error: err.message })),
         // 品质与属性名都取自真实背包,不写死枚举 —— 见 inventory.equipmentSummary
         inventory.equipmentSummary(api).catch((err) => ({ error: err.message })),
         profession.view(api).catch((err) => ({ error: err.message })),
         // 兑换清单来自公会仓库,页面据此渲染下拉,不让用户手写商店 key
-        guild.redeemableItems(api).catch((err) => ({ error: err.message }))
+        guild.redeemableItems(api).catch((err) => ({ error: err.message })),
+        // 活跃宝箱进度:阈值是客户端常量,进度靠 bootstrap.daily 现算
+        activity.activityStatus(api).catch((err) => ({ error: err.message })),
+        // 挂机概览:面板上要先让人看见「攒了多久、多少收益」再决定收不收
+        collectFeature.idleSummary(api).catch((err) => ({ error: err.message }))
       ]);
       const bosses = snapshot.bosses ?? [];
       // 每个首领只送页面用得上的字段。整行直接透传会把 21 份战斗预测和参与者榜单
@@ -211,7 +216,19 @@ export function buildActions(config) {
           : [],
         // 分解条件表单用:品质取值+件数、属性键全集、可分解件数
         equipment: equipment?.error ? { total: 0, disposable: 0, qualities: [], attrKeys: [], rareRanks: [] } : equipment,
-        errors: [snapshot.error, bag?.error, equipment?.error, profView?.error, guildView?.error].filter(Boolean)
+        // 活跃宝箱:活跃点、七项任务进度、五档各自可领与否。面板据此显示「哪档能领、哪档还差多少」
+        activity: activityView?.error ? null : activityView,
+        // 挂机概览:面板显示已攒时长与预计收益,收之前先让人看见
+        idle: idleView?.error ? null : idleView,
+        errors: [
+          snapshot.error,
+          bag?.error,
+          equipment?.error,
+          profView?.error,
+          guildView?.error,
+          activityView?.error,
+          idleView?.error
+        ].filter(Boolean)
       };
     },
 

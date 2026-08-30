@@ -572,7 +572,26 @@
     group(d.quests, "领取任务奖励", "questKey");
     group(d.achievements, "领取成就奖励", "achievementKey");
     group(d.codex, "领取图鉴奖励", "rewardKey");
-    group(d.daily, "领取日常积分奖励", "point", " 点档位");
+
+    // 活跃宝箱。箱名记在浅层,裁剪后仍在;读不到名字才回落到点数。
+    var chest = take(d.daily);
+    if (chest.rows.length) {
+      any = true;
+      out.push(L("领取活跃宝箱 " + chest.rows.length + " 个", "ok"));
+      chest.rows.forEach(function (r) {
+        var name = r && r.name ? String(r.name) : (r && r.point != null ? r.point + " 点档位" : "未知档位");
+        out.push(L(name + resultNote(r.result), "", 1));
+      });
+      chest.notes.forEach(function (n) { out.push(L(n, "muted", 1)); });
+    }
+    // 活跃度现状。即便一个箱子都没领,也要说清「为什么没领」——差多少点、哪几档已领过。
+    var ap = d.activity;
+    if (ap && isNum(ap.score)) {
+      out.push(L("活跃度 " + ap.score + " 点(完成 " + N(ap.doneCount) + "/" + N(ap.questTotal) + " 项日常)", "muted"));
+      asArr(ap.claimed).forEach(function (n) { out.push(L(String(n) + ":今天已领过", "muted", 1)); });
+      asArr(ap.pending).forEach(function (n) { out.push(L(String(n) + ":活跃度还不够", "muted", 1)); });
+      asArr(ap.quests).forEach(function (n) { out.push(L(String(n), "muted", 1)); });
+    }
     if (d.signIn) {
       any = true;
       var sm = d.signIn.message;
@@ -583,7 +602,11 @@
       var mm = d.mail.message;
       out.push(L(typeof mm === "string" && mm ? "邮件:" + mm : "已一键领取邮件奖励", "ok"));
     }
-    if (!any) out.push(L("活动奖励:这次没有可领取的项", "muted"));
+    if (!any) {
+      out.push(L(ap && isNum(ap.score)
+        ? "这次没有可领取的项(任务、成就、签到、邮件都空,活跃宝箱见上)"
+        : "活动奖励:这次没有可领取的项", "muted"));
+    }
     errLines(d.errors, out);
   };
 
