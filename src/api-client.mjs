@@ -31,6 +31,20 @@ const DEFAULT_HEADERS = {
   accept: "application/json"
 };
 
+// 退避重试的间隔。两次足够跨过游戏服务端的瞬时抖动(实测会返 Cloudflare 502
+// origin_bad_gateway,自带 retryable: true),再多重试只是拖长整轮排程。
+const RETRY_BACKOFF_MS = [800, 2000];
+
+// 只有"重发同一请求结果可能不同"的错误才值得重试:超时、连不上、服务端 5xx。
+// 4xx 与坏 JSON 重发结果一样,401/403 走的是另一条重登路径。
+function isRetryable(err) {
+  if (!(err instanceof ApiError) || err instanceof AuthError) return false;
+  if (err.code === "TIMEOUT" || err.code === "NETWORK") return true;
+  return err.code === "SERVER" && typeof err.status === "number" && err.status >= 500;
+}
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
 export class GameApiClient {
   constructor({ baseUrl, version, deviceId, username, password, fetchImpl = globalThis.fetch, timeoutMs = 15000, onLogin }) {
     this.baseUrl = baseUrl.replace(/\/+$/, "");
@@ -86,23 +100,32 @@ export class GameApiClient {
     return token;
   }
 
-  // 通用请求,失败时可选自动重登重试一次
+  // 通用请求。两条重试路径互不干扰:
+  //   ① 会话失效(401/403)-> 重登后重试一次
+  //   ② 瞬时故障(超时/连不上/5xx)-> 按 RETRY_BACKOFF_MS 退避重试
+  // ② 的默认次数按方法分野:GET 只读,重发安全;POST 会真扣次数/门票、真拆装备,
+  // 默认一次都不重试,需要的调用方显式传 retries 才开。
   async request(path, opts = {}) {
-    const { method = "GET", body, responseState = "omit", authed = true, retry = true, timeoutMs } = opts;
-    try {
-      return await this.requestRaw(path, { method, body, responseState, authed, timeoutMs });
-    } catch (err) {
-      const isAuth = err instanceof AuthError;
-      if (isAuth && authed && retry && this.username && this.password) {
-        // 会话失效 -> 重登后重试一次
-        try {
-          await this.login();
-          return await this.requestRaw(path, { method, body, responseState, authed, timeoutMs });
-        } catch {
-          throw err;
+    const { method = "GET", body, responseState = "omit", authed = true, retry = true, timeoutMs, retries } = opts;
+    const send = () => this.requestRaw(path, { method, body, responseState, authed, timeoutMs });
+    const budget = typeof retries === "number" ? retries : method === "GET" ? RETRY_BACKOFF_MS.length : 0;
+
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        return await send();
+      } catch (err) {
+        if (err instanceof AuthError && authed && retry && this.username && this.password) {
+          // 会话失效 -> 重登后重试一次
+          try {
+            await this.login();
+            return await send();
+          } catch {
+            throw err;
+          }
         }
+        if (attempt >= budget || !isRetryable(err)) throw err;
+        await sleep(RETRY_BACKOFF_MS[Math.min(attempt, RETRY_BACKOFF_MS.length - 1)]);
       }
-      throw err;
     }
   }
 

@@ -263,8 +263,15 @@ function bossRowHint(r, difficulty) {
   if (r.attemptPool) {
     const p = r.attemptPool;
     if (typeof p.freeRemaining === "number") bits.push(`免费 ${p.freeRemaining}/${p.freeLimit ?? "?"}`);
+  } else if (typeof r.attempts === "number") {
+    // 个人首领的次数已由上面的免费池说清楚,再写一遍是重复;
+    // 地图首领没有池,attempts 才是它当前能打几次(实测恒为 1,配合刷新说明才完整)
+    bits.push(`可挑战 ${r.attempts} 次`);
   }
   if (r.blockedReason) bits.push(`不可挑战:${r.blockedReason}`);
+  // 紧跟在阻挡原因后面:地图首领被拦时服务端原话是「今日挑战次数已用尽。」,
+  // 而它实际只受刷新时间限制。原话不改,后面接上服务端自报的刷新规则,才不会把人带偏。
+  if (r.refreshText) bits.push(r.refreshText);
   return bits.join(" · ");
 }
 
@@ -807,6 +814,8 @@ function panelBossWorld(r, opts) {
         if (typeof inst.remainingAttemptCount === "number") bits.push(`本场次还可协作 ${inst.remainingAttemptCount} 次`);
       }
       if (row.assistBlockedReason) bits.push(row.assistBlockedReason);
+      // 服务端自报的场次时段。比让人回「通用设置」核对时间窗直接
+      if (row.refreshText) bits.push(row.refreshText);
       return bits.join(" · ") || String(row.bossKey ?? "");
     }
   });

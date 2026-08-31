@@ -283,13 +283,44 @@ check("世界首领状态按数组渲染,并借 attempted 的中文名", () => {
   assert.doesNotMatch(t, /no_data_boss:/);       // 一个字段都读不到就整行不出
 });
 
-check("世界首领显示中文名而不是 bossKey 裸键", () => {
+// 真号实测:每个世界首领会协作到本场次次数用尽(maxAttemptCount=3),assisted 里每次一条,
+// 存的是浅层战果而不是整个响应 —— 深层 result.worldBoss.* 会被落库裁剪掉,
+// 而 resultNote 只读 message/msg、协作响应两个键都没有,存了也一个字渲不出来。
+check("世界首领按首领归并协作次数,不平铺每一次", () => {
+  const shared = { bossKey: "scarlet_duke", name: "猩红公爵", maxAttemptCount: 3, hpPercent: 95.29, status: "active" };
   const t = text({
-    assisted: [{ bossKey: "scarlet_duke", name: "赤红公爵", reason: "打不过", result: { message: "已协助" } }],
+    assisted: [
+      { ...shared, round: 1, damage: 529852, myDamagePercent: 0.7771, myAttemptCount: 1, remainingAttemptCount: 2 },
+      { ...shared, round: 2, damage: 512300, myDamagePercent: 1.53, myAttemptCount: 2, remainingAttemptCount: 1 },
+      { ...shared, round: 3, damage: 500000, myDamagePercent: 2.26, myAttemptCount: 3, remainingAttemptCount: 0 }
+    ],
     attempted: []
   }, "boss.world");
-  assert.match(t, /赤红公爵/);
-  assert.doesNotMatch(t, /scarlet_duke/);
+  assert.match(t, /协作讨伐 1 个世界首领,共 3 次/);
+  assert.match(t, /猩红公爵:协作 3\/3 次/);   // 次数取服务端自报的,含手动打的那几次
+  assert.match(t, /累计伤害 1,542,152/);      // 三次相加,不是只取最后一次
+  assert.match(t, /伤害占比 2\.26%/);
+  assert.match(t, /首领剩余血量 95\.29%/);
+  assert.doesNotMatch(t, /scarlet_duke/);      // 有中文名就不露键
+  assert.doesNotMatch(t, /协作讨伐世界首领 3 次/); // 旧抬头:首领数与次数混为一谈
+});
+
+// R16:服务端拦地图首领时给的原话是「今日挑战次数已用尽。」,但实测地图首领
+// 不受每日次数限制、只受刷新时间限制。原话照登不改写,后面附服务端自报的刷新规则。
+check("跳过原因保留服务端原话,并附上刷新规则", () => {
+  const t = text({
+    attempted: [],
+    skipped: [
+      {
+        bossKey: "nightmare_treant",
+        name: "梦魇古树",
+        difficulty: "normal",
+        reason: "今日挑战次数已用尽。",
+        refreshText: "地图首领每 2 小时刷新"
+      }
+    ]
+  }, "boss.map");
+  assert.match(t, /梦魇古树 —— 今日挑战次数已用尽。\(地图首领每 2 小时刷新\)/);
 });
 
 check("未知结构也不吐 JSON", () => {

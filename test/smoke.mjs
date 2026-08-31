@@ -42,6 +42,15 @@ let worldStatusRows = [
 // 世界首领行的协作闸门,用例要分别覆盖"可协作"与"场次已结束"
 let worldAssistBlocked = "";
 
+// 协作场次的可变状态。真号实测每场次 maxAttemptCount=3,assist 响应自带 worldBoss 段,
+// 循环协作就是靠它驱动的 —— 假响应少了这段,循环会走"读不到次数就停手",
+// 于是"每个首领只协作一次"的老 bug 在测试里照样全绿。
+// frozen: 服务端不把这次算进去(remainingAttemptCount 不往下走),用来测空转停手。
+let assistState = { my: 0, max: 3, status: "active", frozen: false };
+const resetAssist = (over = {}) => {
+  assistState = { my: 0, max: 3, status: "active", frozen: false, ...over };
+};
+
 // 难度档。真号每个首领都带 difficultyOptions 三档,门票消耗按类型分野:
 // 个人首领三档全 0(扣的是 personalAttemptPool),地图/世界 普通 0 / 困难 1 / 噩梦 2。
 // 缺了这个字段,useTickets:false 时后端会按"读不到门票消耗"整批跳过 —— 那是刻意的保守行为。
@@ -148,8 +157,28 @@ function fakeFetch(url, opts = {}) {
         : reply({ predictedWin: true, chance: 95 });
     case "/api/boss/challenge":
       return reply({ battle: { win: true }, rewards: { summary: ["金币"] } });
-    case "/api/boss/assist":
-      return reply({ assisted: body.bossKey });
+    // 真号形状:顶层 damage,场次进度在 worldBoss 段。没有 cost 字段 —— 协作不扣门票。
+    case "/api/boss/assist": {
+      if (!assistState.frozen) assistState.my += 1;
+      const left = Math.max(0, assistState.max - assistState.my);
+      return reply({
+        damage: 529852,
+        worldBoss: {
+          instanceId: "wb_boss_w_fixed_20",
+          bossKey: body.bossKey,
+          maxHp: 1000,
+          currentHp: 900,
+          hpPercent: 90,
+          status: assistState.status,
+          maxAttemptCount: assistState.max,
+          myDamage: 529852 * assistState.my,
+          myDamagePercent: 0.7771 * assistState.my,
+          myAttemptCount: assistState.my,
+          remainingAttemptCount: left,
+          rewardStatus: "pending"
+        }
+      });
+    }
     case "/api/boss/claim-reward":
       return reply({ claimed: true });
     // 真实服务端返回的是实例数组(每项自带 status),不是单个对象。
@@ -175,11 +204,12 @@ const { openDb } = await import("../src/db.mjs");
 const { SecretBox } = await import("../src/crypto.mjs");
 const { AccountStore } = await import("../src/accounts/store.mjs");
 const { AccountService } = await import("../src/accounts/service.mjs");
-const { Scheduler } = await import("../src/scheduler.mjs");
+const { Scheduler, zonedParts } = await import("../src/scheduler.mjs");
 const { createHttpServer } = await import("../src/http-server.mjs");
 const { SettingsStore } = await import("../src/settings.mjs");
 const { buildActions } = await import("../src/actions.mjs");
 const { unwrap } = await import("../src/util.mjs");
+const { GameApiClient } = await import("../src/api-client.mjs");
 const bossFeature = await import("../src/features/boss.mjs");
 
 console.log("\n[1] 配置与密钥校验");
@@ -393,20 +423,51 @@ check("免费次数够则正常打", bpFree.attempted.some((x) => x.bossKey === 
 
 // 世界首领:只参与协作讨伐 + 领奖,不主动挑战 —— 主攻会按困难/噩梦档扣门票,与本意相反。
 // 协作闸门在首领行的 assistBlockedReason / worldInstance 上,不在 world-status 接口。
+resetAssist();
 const callsBeforeOpen = calls.length;
 const wbOpen = await service.run("fzx401", (api, row) => actions["boss.world"](api, row));
 const wbOpenPaths = calls.slice(callsBeforeOpen).map((c) => c.path);
+// 每场次 maxAttemptCount=3,必须协作到次数用尽 —— 只打 1 次等于白丢 2/3 的伤害贡献
 check(
-  "可协作时走 assist 并记下中文名",
-  wbOpen.assisted.length === 1 &&
-    wbOpen.assisted[0].bossKey === "boss_w" &&
-    wbOpen.assisted[0].name === "世界首领" &&
+  "协作到本场次次数用尽",
+  wbOpen.assisted.length === 3 &&
+    wbOpen.assisted.every((a) => a.bossKey === "boss_w" && a.name === "世界首领") &&
+    wbOpen.assisted.map((a) => a.remainingAttemptCount).join(",") === "2,1,0" &&
     wbOpen.skipped.length === 0,
   JSON.stringify({ assisted: wbOpen.assisted, skipped: wbOpen.skipped })
+);
+// 判定与展示字段都要在浅层:深层 result.worldBoss.* 会被落库裁剪掉,整个 result 又渲不出东西
+check(
+  "每次协作只记浅层战果,不存整个响应",
+  wbOpen.assisted[0].result === undefined &&
+    wbOpen.assisted[0].damage === 529852 &&
+    wbOpen.assisted[2].myAttemptCount === 3 &&
+    wbOpen.assisted[2].maxAttemptCount === 3 &&
+    wbOpen.assisted[0].round === 1,
+  JSON.stringify(wbOpen.assisted[0])
 );
 check("世界首领不主动挑战也不调 preview", !wbOpenPaths.includes("/api/boss/challenge") && !wbOpenPaths.includes("/api/boss/preview"), JSON.stringify(wbOpenPaths));
 check("协作成功后领奖", wbOpen.claimed?.claimed === true, JSON.stringify(wbOpen.claimed));
 check("场次信息照原样带出供页面显示", Array.isArray(wbOpen.status) && wbOpen.status[0]?.status === "active", JSON.stringify(wbOpen.status));
+
+// 血条被全服打空(defeated)/场次时间到(ended):次数还剩也打不了了,必须立刻收手
+resetAssist({ status: "defeated" });
+const wbDefeated = await service.run("fzx401", (api, row) => actions["boss.world"](api, row));
+check(
+  "场次已不是 active 就停手",
+  wbDefeated.assisted.length === 1 && wbDefeated.assisted[0].status === "defeated",
+  JSON.stringify(wbDefeated.assisted)
+);
+
+// 服务端没把这次算进去(剩余次数不往下走),再发只是空转 —— 必须停,否则是死循环
+resetAssist({ frozen: true });
+const wbFrozen = await service.run("fzx401", (api, row) => actions["boss.world"](api, row));
+check(
+  "剩余次数不推进就停手,不空转",
+  wbFrozen.assisted.length === 2 && wbFrozen.errors.length === 0,
+  JSON.stringify({ assisted: wbFrozen.assisted.length, errors: wbFrozen.errors })
+);
+resetAssist();
 
 // 服务端给了协作阻挡原因就必须停手,且一次 assist 都不发
 worldAssistBlocked = "当前世界首领场次未开放或已经结束。";
@@ -439,6 +500,68 @@ check("签到与邮件", act.signIn?.signedIn === true && act.mail?.claimedCount
 const st = await service.run("fzx401", (api, row) => actions.status(api, row));
 check("状态汇总", st.idle?.validSeconds === 39600 && st.bosses === 7, JSON.stringify({ bosses: st.bosses }));
 
+// ---- 排程触发时机 ----
+// plannedJobs 只决定"这一 tick 要不要排",真正的去重交给 job_runs 的唯一约束。
+// 第四个参数就是"上一轮起跑时刻"的注入点,所以这里不必碰私有 #lastRunAt,也不必等真实时间。
+// 地图首领是唯一改成滚动型的任务:绝对时间片的片界固定(2 小时片落在偶数点整)、
+// 与游戏的刷新周期同频,每轮都贴着刷新边界发起,实测约一半轮次整轮被服务端拦掉。
+const planRules = {
+  collect: { enabled: true, intervalHours: 2 },
+  boss: { enabled: true, mapIntervalHours: 2, challengePersonal: false, worldWindows: [] }
+};
+const planAt = (iso, last = {}) => {
+  const now = new Date(iso);
+  return scheduler.plannedJobs(planRules, zonedParts(now, config.timezone), now, (k) => last[k] ?? null);
+};
+const planKeys = (iso, last) => planAt(iso, last).map((j) => j.key);
+const planIdem = (iso, key, last) => planAt(iso, last).find((j) => j.key === key)?.idem ?? null;
+
+const LAST_MAP = "2026-08-31T02:00:00.000Z";
+check(
+  "地图首领没跑过就立刻排",
+  planKeys("2026-08-31T02:00:00.000Z").includes("boss.map") &&
+    planIdem("2026-08-31T02:00:00.000Z", "boss.map") === "boss.map:init",
+  JSON.stringify(planAt("2026-08-31T02:00:00.000Z"))
+);
+check(
+  "刚跑过就不排",
+  !planKeys("2026-08-31T02:30:00.000Z", { "boss.map": LAST_MAP }).includes("boss.map"),
+  JSON.stringify(planAt("2026-08-31T02:30:00.000Z", { "boss.map": LAST_MAP }))
+);
+// 核心一条:整 2 小时到了但余量没满就是不排。老方案恰恰在这个时刻发起,
+// 而一轮里首领是依次打的、发起时刻本身还带 tick 抖动,于是整轮贴边被拦。
+check(
+  "满 2 小时但没满 3 分钟余量,仍然不排",
+  !planKeys("2026-08-31T04:00:00.000Z", { "boss.map": LAST_MAP }).includes("boss.map") &&
+    !planKeys("2026-08-31T04:02:59.000Z", { "boss.map": LAST_MAP }).includes("boss.map"),
+  JSON.stringify(planAt("2026-08-31T04:00:00.000Z", { "boss.map": LAST_MAP }))
+);
+check(
+  "凑够 2 小时 3 分就排,幂等键取上一轮时刻",
+  planIdem("2026-08-31T04:03:00.000Z", "boss.map", { "boss.map": LAST_MAP }) === `boss.map:${LAST_MAP}`,
+  JSON.stringify(planAt("2026-08-31T04:03:00.000Z", { "boss.map": LAST_MAP }))
+);
+// job_runs 的唯一约束是 (account_id, idempotency_key),不含 job_key ——
+// 幂等键不自带任务前缀,不同任务就会互相顶掉。
+check(
+  "幂等键都自带任务前缀",
+  planAt("2026-08-31T04:03:00.000Z", { "boss.map": LAST_MAP }).every((j) => j.idem.startsWith(`${j.key}:`)),
+  JSON.stringify(planAt("2026-08-31T04:03:00.000Z", { "boss.map": LAST_MAP }))
+);
+// 上一轮时刻只喂给滚动型任务,interval 型的键仍是绝对时间片编号
+check(
+  "interval 型任务不受滚动改动影响",
+  planIdem("2026-08-31T04:03:00.000Z", "collect", { "boss.map": LAST_MAP, collect: LAST_MAP }) ===
+    `collect:${Math.floor(Date.parse("2026-08-31T04:03:00.000Z") / (2 * 3600 * 1000))}`,
+  JSON.stringify(planAt("2026-08-31T04:03:00.000Z", { collect: LAST_MAP }))
+);
+// 落库时刻坏掉(手工改库/时钟回拨写进脏值)就当没跑过照常排,而不是永久卡住
+check(
+  "上一轮时刻不可解析时按没跑过处理",
+  planIdem("2026-08-31T04:03:00.000Z", "boss.map", { "boss.map": "坏值" }) === "boss.map:坏值",
+  JSON.stringify(planAt("2026-08-31T04:03:00.000Z", { "boss.map": "坏值" }))
+);
+
 console.log("\n[4] 必带请求头");
 const c = calls.find((x) => x.path === "/api/battle/idle-collect");
 check("client-version", c.headers["x-placegame-client-version"] === "0.2.50");
@@ -460,7 +583,144 @@ service.setEnabled("fzx401", true);
 store.setSecret(store.getByLabel("fzx401").id, "password", "secret");
 check("恢复后失败计数清零", store.getByLabel("fzx401").auth_failure_count === 0);
 
-console.log("\n[6] REST 接口");
+console.log("\n[6] 请求重试与退避");
+// 这一节最要紧的一条是"POST 默认不重试"。decompose 重发会把已经拆掉的装备再拆一批,
+// challenge 重发会重复扣次数与门票 —— 那种错误在真号上不可逆,所以默认值必须有断言守着。
+//
+// 退避真睡 800ms + 2000ms,整节跑下来要好几秒。这里把 setTimeout 换成"小延时立刻回调、
+// 顺手记下时长",既不拖慢测试,又能顺带验证退避间隔本身。abort 计时器也走 setTimeout,
+// 所以客户端统一给 30 秒超时:只加速 5 秒以下的延时,abort 那条不受影响。
+const realSetTimeout = globalThis.setTimeout;
+let sleeps = [];
+globalThis.setTimeout = (fn, ms, ...rest) =>
+  ms > 0 && ms < 5000 ? (sleeps.push(ms), realSetTimeout(fn, 0, ...rest)) : realSetTimeout(fn, ms, ...rest);
+
+// 按脚本逐次作答的假 fetch。每项对应一次请求:
+//   "timeout" -> AbortError(客户端译成 code=TIMEOUT)
+//   "network" -> 连不上(code=NETWORK)
+//   数字      -> 该状态码的失败响应(5xx 走 code=SERVER)
+//   "badjson" -> 200 但正文不是 JSON(code=BAD_JSON)
+//   "ok"      -> 正常响应;登录端点额外给 sessionToken
+function scriptedClient(script) {
+  const seen = [];
+  const client = new GameApiClient({
+    baseUrl: "http://127.0.0.1:1",
+    version: "0.2.50",
+    deviceId: "device_" + "0".repeat(48),
+    username: "fzx401",
+    password: "secret",
+    timeoutMs: 30000,
+    fetchImpl: (url, opts = {}) => {
+      const path = new URL(url).pathname;
+      seen.push({ path, method: opts.method ?? "GET" });
+      const step = script[seen.length - 1] ?? "ok";
+      if (step === "timeout") {
+        const err = new Error("aborted");
+        err.name = "AbortError";
+        return Promise.reject(err);
+      }
+      if (step === "network") return Promise.reject(new Error("ECONNREFUSED"));
+      if (step === "badjson") {
+        return Promise.resolve({ ok: true, status: 200, text: () => Promise.resolve("<html>502</html>") });
+      }
+      if (typeof step === "number") {
+        return Promise.resolve({
+          ok: false,
+          status: step,
+          text: () => Promise.resolve(JSON.stringify({ ok: false, error: `HTTP ${step}` }))
+        });
+      }
+      const data = path === "/api/auth/login" ? { sessionToken: "sess_retry", expiresAt: 1893456000000 } : { fine: true };
+      return Promise.resolve({ ok: true, status: 200, text: () => Promise.resolve(JSON.stringify({ ok: true, data })) });
+    }
+  });
+  client.setSession("sess_pre"); // 预置会话,免得每个用例都先打一次登录
+  return { client, seen };
+}
+const attempt = async (script, path, opts) => {
+  sleeps = [];
+  const { client, seen } = scriptedClient(script);
+  const out = await client.request(path, opts).then(
+    () => ({ ok: true }),
+    (err) => ({ ok: false, code: err.code, message: err.message })
+  );
+  return { ...out, calls: seen.length, paths: seen.map((s) => s.path), sleeps: [...sleeps] };
+};
+
+// 核心安全性质:POST 默认预算 0。谁把这个默认值改开了,这条就会红。
+const postTimeout = await attempt(["timeout"], "/api/equipment/decompose", { method: "POST", body: { equipmentIds: ["e1"] } });
+check(
+  "POST 默认一次都不重试",
+  postTimeout.ok === false && postTimeout.calls === 1 && postTimeout.code === "TIMEOUT",
+  JSON.stringify(postTimeout)
+);
+// 分解与挑战是不可逆的,连"传了 retries 才重试"都得确认它们没传
+const postBudget = await attempt([500, "ok"], "/api/boss/challenge", { method: "POST", body: { bossKey: "b" } });
+check("POST 遇 5xx 也不自动重发", postBudget.ok === false && postBudget.calls === 1, JSON.stringify(postBudget));
+
+// GET 只读,重发安全,默认吃满 RETRY_BACKOFF_MS 两次
+const getRecovers = await attempt(["timeout", 502, "ok"], "/api/client/dynamic-view");
+check(
+  "GET 默认重试 2 次,退避 800/2000ms",
+  getRecovers.ok === true && getRecovers.calls === 3 && JSON.stringify(getRecovers.sleeps) === "[800,2000]",
+  JSON.stringify(getRecovers)
+);
+const getExhausted = await attempt(["timeout", "network", 503, "ok"], "/api/client/dynamic-view");
+check(
+  "GET 预算用尽就抛,不无限重试",
+  getExhausted.ok === false && getExhausted.calls === 3 && getExhausted.code === "SERVER",
+  JSON.stringify(getExhausted)
+);
+
+// assist 走的就是这条:世界首领协作不扣门票也不扣次数,重发是安全的,所以显式开了 2 次
+const assistRetry = await attempt(["timeout", "ok"], "/api/boss/assist", { method: "POST", body: { bossKey: "b" }, retries: 2 });
+check(
+  "POST 显式传 retries 才重试",
+  assistRetry.ok === true && assistRetry.calls === 2 && JSON.stringify(assistRetry.sleeps) === "[800]",
+  JSON.stringify(assistRetry)
+);
+// 不只验 request 的预算,连 assist 这条真实调用路径一起验:R15 丢掉的那个首领
+// 就是 assist 撞上超时后整个首领被跳过的
+sleeps = [];
+const assistPath = scriptedClient(["timeout", "ok"]);
+const assistOut = await bossFeature.assist(assistPath.client, "boss_w").then(
+  () => ({ ok: true }),
+  (err) => ({ ok: false, message: err.message })
+);
+check(
+  "assist 撞上超时会自己重发,不丢首领",
+  assistOut.ok === true && assistPath.seen.length === 2 && assistPath.seen[1].path === "/api/boss/assist",
+  JSON.stringify({ ...assistOut, calls: assistPath.seen.length })
+);
+
+// 重发结果不会变的错误一律不重试:4xx 是入参/状态问题,坏 JSON 再要一次还是坏的
+for (const [name, script, code] of [
+  ["4xx 不重试", [400, "ok"], "SERVER"],
+  ["404 不重试", [404, "ok"], "SERVER"],
+  ["坏 JSON 不重试", ["badjson", "ok"], "BAD_JSON"]
+]) {
+  const r = await attempt(script, "/api/client/dynamic-view");
+  check(name, r.ok === false && r.calls === 1 && r.code === code, JSON.stringify(r));
+}
+
+// 401 走的是另一条路径:重登后只重试一次,且不进退避循环
+const reauth = await attempt([401, "ok", "ok"], "/api/client/dynamic-view");
+check(
+  "401 重登后重试一次就成功",
+  reauth.ok === true && reauth.calls === 3 && reauth.paths[1] === "/api/auth/login" && reauth.sleeps.length === 0,
+  JSON.stringify(reauth)
+);
+// 一直 401 时不能变成"重登-重试"的死循环,也不该退避空转
+const reauthDead = await attempt([401, "ok", 401], "/api/client/dynamic-view");
+check(
+  "一直 401 就抛原错,不循环重登",
+  reauthDead.ok === false && reauthDead.code === "AUTH" && reauthDead.calls === 3 && reauthDead.sleeps.length === 0,
+  JSON.stringify(reauthDead)
+);
+
+globalThis.setTimeout = realSetTimeout;
+
+console.log("\n[7] REST 接口");
 const settings = new SettingsStore(db, new SecretBox(config.masterKeyB64), {
   envApiToken: config.apiToken,
   sessionHours: config.webSessionHours
@@ -510,7 +770,7 @@ await call("POST", "/accounts/fzx401/enable");
 const tasks = await call("GET", "/tasks");
 check("排程状态", tasks.status === 200 && tasks.json.data.scheduler.timezone === "Asia/Shanghai");
 
-console.log("\n[7] WebUI 鉴权与设置");
+console.log("\n[8] WebUI 鉴权与设置");
 const WEB_PW = "correct-horse-battery-staple";
 
 for (const [path, type] of [["/", "text/html"], ["/app.js", "javascript"], ["/style.css", "text/css"]]) {

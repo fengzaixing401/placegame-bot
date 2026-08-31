@@ -4,6 +4,12 @@ import { compactForStore } from "./util.mjs";
 
 const TICK_MS = 60 * 1000;
 
+// 滚动排程在间隔之上额外加的余量。地图首领的刷新是"每个首领各自从上次挑战起算 2 小时"
+// (服务端自报 refreshText「地图首领每 2 小时刷新」),而一轮里几个首领是依次打的、
+// 整轮发起时刻本身还带 tick 抖动 —— 不留余量就会贴着刷新边界,整轮全被拦。
+// 3 分钟足够盖住这两项,代价只是每轮往后挪 3 分钟(每天少跑不到半轮)。
+const ROLL_MARGIN_MS = 3 * 60 * 1000;
+
 // 时区换算:取指定 IANA 时区下的日期与分钟数。排程必须按 Asia/Shanghai 判断
 // 游戏的时间窗口(世界首领 10-11/16-17/20-21 点、每日刷新),不能用容器本地时区。
 export function zonedParts(date, timeZone) {
@@ -44,6 +50,7 @@ export function activeWindow(parts, windows) {
 
 // 幂等键决定"同一件事不重复做":
 // - interval 型:用 UTC 时间片编号(floor(now/间隔)),同一时间片内只跑一次
+// - rolling 型:用上一轮的起跑时刻,凑够"间隔 + 余量"才排下一轮(见 ROLL_MARGIN_MS)
 // - daily 型:用账号时区的日期
 // - window 型:用日期 + 窗口标识
 export class Scheduler {
@@ -98,7 +105,7 @@ export class Scheduler {
   async #runAccount(account, now) {
     const rules = rulesFor(this.config, account.rules_json ? JSON.parse(account.rules_json) : null);
     const parts = zonedParts(now, this.config.timezone);
-    const jobs = this.plannedJobs(rules, parts, now);
+    const jobs = this.plannedJobs(rules, parts, now, (jobKey) => this.#lastRunAt(account.id, jobKey));
     const ran = [];
     for (const job of jobs) {
       // 单任务失败不影响该账号的其他任务
@@ -113,9 +120,22 @@ export class Scheduler {
   }
 
   // 产出本 tick 应当尝试的任务(带幂等键)。是否真正执行由 job_runs 唯一约束裁决。
-  plannedJobs(rules, parts, now) {
+  // lastRunOf(jobKey) 给出该任务上一轮的起跑时刻(ISO,没跑过给 null),供滚动型任务定次数。
+  plannedJobs(rules, parts, now, lastRunOf = () => null) {
     const jobs = [];
     const slot = (hours) => Math.floor(now.getTime() / (hours * 3600 * 1000));
+
+    // 滚动型:排下一轮的时刻由上一轮起跑时刻决定,而不是切绝对时间片。
+    // 绝对时间片的片界固定(2 小时片就落在偶数点整),与游戏的刷新周期同频,
+    // 于是每轮都贴着刷新边界发起,约一半的轮次整轮被服务端拦掉 —— 实测就是这样丢掉的。
+    // 幂等键取上一轮时刻:成功一轮键就变一次,天然幂等;失败/空转的那一轮也会推进,
+    // 所以不存在"键不变 + 到期不了"的死锁。
+    const rolling = (key, hours) => {
+      const last = lastRunOf(key);
+      const lastMs = last ? Date.parse(last) : NaN;
+      if (Number.isFinite(lastMs) && now.getTime() < lastMs + hours * 3600 * 1000 + ROLL_MARGIN_MS) return;
+      jobs.push({ key, idem: `${key}:${last ?? "init"}` });
+    };
 
     if (rules.collect?.enabled) {
       jobs.push({ key: "collect", idem: `collect:${slot(rules.collect.intervalHours)}` });
@@ -130,7 +150,8 @@ export class Scheduler {
       jobs.push({ key: "guild", idem: `guild:${slot(rules.guild.intervalHours)}` });
     }
     if (rules.boss?.enabled) {
-      jobs.push({ key: "boss.map", idem: `boss.map:${slot(rules.boss.mapIntervalHours)}` });
+      // 地图首领不受每日次数限制,只受刷新时间限制(服务端自报),所以按滚动排
+      rolling("boss.map", rules.boss.mapIntervalHours);
       // 个人首领要显式开 challengePersonal 才排程:每日免费次数有限,
       // 用完服务端就自动扣门票,不该默认自动消耗。
       if (rules.boss.challengePersonal === true) {
@@ -146,6 +167,16 @@ export class Scheduler {
       jobs.push({ key: "activity", idem: `activity:${parts.date}` });
     }
     return jobs;
+  }
+
+  // 某任务上一轮的起跑时刻。取"任意结果"的最近一轮(含 error 与空转)——
+  // 只认成功会让一次报错把该任务永久卡住:键不变,到期判断也不前进。
+  // started_at 是定长 UTC ISO,字典序即时间序,可直接排序取首行。
+  #lastRunAt(accountId, jobKey) {
+    const row = this.db
+      .prepare(`SELECT started_at FROM job_runs WHERE account_id=? AND job_key=? ORDER BY started_at DESC LIMIT 1`)
+      .get(accountId, jobKey);
+    return row?.started_at ?? null;
   }
 
   // 幂等落库:先抢占 job_runs 行(UNIQUE 冲突 = 已跑过),再执行动作。

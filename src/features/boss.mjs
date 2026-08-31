@@ -5,6 +5,9 @@ import { difficulty as difficultyLabel } from "../labels.mjs";
 // 首领类型(dynamic-view 的 data.bosses[].type)
 export const BOSS_TYPE = { PERSONAL: "personal", MAP: "map", WORLD: "world" };
 
+// 数值字段读不到就给 null。渲染层一律"读不到就少写一行",不拿 undefined 拼句子。
+const num = (v) => (typeof v === "number" && Number.isFinite(v) ? v : null);
+
 // 免费/门票次数。真号实测:只有 personal 类型的首领带 personalAttemptPool,
 // 且它挂在每个首领对象上,不在玩家快照里 —— 早先按 player.personalBossAttempts 读恒为 null,
 // 使"不允许用门票"的闸门从未真正生效过。
@@ -162,9 +165,11 @@ export async function challenge(api, bossKey, rules) {
   return unwrap(await api.request("/api/boss/challenge", { method: "POST", body: challengeBody(bossKey, rules) }));
 }
 
+// 协作不扣门票也不扣挑战次数(响应里没有 cost 字段),重发最坏只是多提交一次伤害,
+// 所以这里显式开退避重试 —— 场次只开一小时,超时丢掉就等下一场了。
 export async function assist(api, bossKey) {
   if (!bossKey) throw new Error("assist 需要 bossKey");
-  return unwrap(await api.request("/api/boss/assist", { method: "POST", body: { bossKey } }));
+  return unwrap(await api.request("/api/boss/assist", { method: "POST", body: { bossKey }, retries: 2 }));
 }
 
 export async function claimReward(api) {
@@ -260,8 +265,12 @@ export async function runBosses(api, { types, rules = {}, maxChallenges = 5, dry
     if (out.attempted.length >= maxChallenges) break;
     const key = pickKey(boss);
     const difficulty = difficultyFor(boss);
-    // difficulty 记进每条结果:两类首领难度不同,日志里不写清楚就分不出这一场打的是哪档
-    const label = { bossKey: key, name: boss.name, difficulty };
+    // difficulty 记进每条结果:两类首领难度不同,日志里不写清楚就分不出这一场打的是哪档。
+    // refreshText 是服务端自报的刷新规则(地图「每 2 小时刷新」/ 个人「共享每日 5 次免费…」),
+    // 一并记下是因为地图首领被拦时服务端给的原话是「今日挑战次数已用尽。」——
+    // 实测地图首领不受每日次数限制、只受刷新时间限制,这句措辞会把人带偏。
+    // 原话照登不改写,另附刷新规则让日志自己说清楚到底在等什么。
+    const label = { bossKey: key, name: boss.name, difficulty, refreshText: boss.refreshText ?? null };
     const reason = blockedReason(boss, difficulty);
     if (reason) {
       out.skipped.push({ ...label, reason });
@@ -371,6 +380,50 @@ export function assistBlockedReason(row) {
   return null;
 }
 
+// 一个世界首领的协作,循环到本场次次数用尽。
+// 真号实测每场次 maxAttemptCount=3,而早先每个首领只协作 1 次,等于白丢 2/3 的伤害贡献。
+// 循环靠 assist 响应自带的 worldBoss 段驱动(remainingAttemptCount/status),不必反复拉 dynamic-view。
+//
+// 停手条件按"宁可少打也不空转"排:
+//   ① assist 报错 —— 记进 errors,这个首领就此收手
+//   ② 响应里读不到 worldBoss.remainingAttemptCount —— 不猜次数
+//   ③ 次数归零,或场次已不是 active(被全服打死 defeated / 时间到 ended)
+//   ④ 剩余次数没往下走 —— 服务端没把这次算进去,再发只是空转
+async function assistUntilExhausted(api, label, out) {
+  let lastLeft = null;
+  for (let round = 1; ; round += 1) {
+    let result;
+    try {
+      result = await assist(api, label.bossKey);
+    } catch (err) {
+      out.errors.push({ ...label, round, error: err.message });
+      return;
+    }
+
+    // 判定与展示用的字段都记在浅层(assisted[i] 深度 2):
+    // 深层 result.worldBoss.* 会被落库裁剪掉,整个 result 又对渲染毫无用处 ——
+    // resultNote 只读 message,协作响应没有这个字段,存进去只会把结果行顶过 60000 字上限。
+    const inst = result?.worldBoss;
+    const left = num(inst?.remainingAttemptCount);
+    out.assisted.push({
+      ...label,
+      round,
+      damage: num(result?.damage),
+      myDamagePercent: num(inst?.myDamagePercent),
+      myAttemptCount: num(inst?.myAttemptCount),
+      maxAttemptCount: num(inst?.maxAttemptCount),
+      remainingAttemptCount: left,
+      hpPercent: num(inst?.hpPercent),
+      status: inst?.status ?? null
+    });
+
+    if (left === null || left <= 0) return;
+    if (inst.status && inst.status !== "active") return;
+    if (lastLeft !== null && left >= lastLeft) return;
+    lastLeft = left;
+  }
+}
+
 // ⑤ 世界首领:只参与协作讨伐 + 领奖,不主动挑战。
 // 世界首领是全服共同消耗一个血条的场次战,个人主攻既无难度可选也无"胜率"可言;
 // 服务端虽然也接受 challenge,但那会按困难/噩梦档扣掉门票,与"只参与协作"的本意相反。
@@ -391,14 +444,10 @@ export async function runWorldBoss(api, { rules = {} } = {}) {
     const label = { bossKey: key, name: boss.name };
     const reason = assistBlockedReason(boss);
     if (reason) {
-      out.skipped.push({ ...label, reason });
+      out.skipped.push({ ...label, reason, refreshText: boss.refreshText ?? null });
       continue;
     }
-    try {
-      out.assisted.push({ ...label, result: await assist(api, key) });
-    } catch (err) {
-      out.errors.push({ ...label, error: err.message });
-    }
+    await assistUntilExhausted(api, label, out);
   }
 
   // 一个都没协作成功就不必领奖,省一次请求

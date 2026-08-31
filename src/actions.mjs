@@ -127,6 +127,12 @@ export function buildActions(config) {
           type: b.type ?? null,
           mapName: b.mapName ?? null,
           requiredLevel: typeof b.requiredLevel === "number" ? b.requiredLevel : null,
+          // 服务端自报的刷新规则与当前可挑战次数。三类首领的限制根本不同 ——
+          // 地图「每 2 小时刷新」(attempts 恒为 1,不受每日次数限制)、
+          // 个人「共享每日 5 次免费,门票最多追加 5 次」、世界则是三个固定场次时段。
+          // 面板照抄服务端原话,不本地推断,免得把三套限制讲成一套。
+          refreshText: b.refreshText ?? null,
+          attempts: typeof b.attempts === "number" ? b.attempts : null,
           // 各难度自带胜率与消耗,与游戏内难度选择界面同源
           difficulties: (b.difficultyOptions ?? []).map((o) => ({
             key: o.key,

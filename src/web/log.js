@@ -505,13 +505,40 @@
     att.rows.forEach(function (a) { bossAttempt(a, out); });
     att.notes.forEach(function (n) { out.push(L(n, "muted")); });
 
-    // 世界首领是协作语义,没有胜负也没有难度
+    // 世界首领是协作语义,没有胜负也没有难度。一个首领每场次可协作多次(实测 3 次),
+    // 所以按首领归并成一行 —— 七个首领平铺二十多行是噪音,合起来才看得出"这个打满了没有"。
+    // 场次进度取最后一次协作的响应:服务端自报的 myAttemptCount 含手动打的那几次,
+    // 比我们自己数的轮数更接近游戏里显示的数字。
     var asst = take(d.assisted);
     if (asst.rows.length) {
-      out.push(L("协作讨伐世界首领 " + asst.rows.length + " 次", "ok"));
+      var order = [], byBoss = {};
       asst.rows.forEach(function (a) {
-        out.push(L((a.name || a.bossKey || "未知首领") + resultNote(a.result), "", 1));
+        if (!a || typeof a !== "object") return;
+        var bk = a.bossKey || a.name || "未知首领";
+        if (!byBoss[bk]) {
+          byBoss[bk] = { name: a.name || a.bossKey || "未知首领", times: 0, damage: 0, hasDamage: false, last: a };
+          order.push(bk);
+        }
+        var g = byBoss[bk];
+        g.times += 1;
+        if (isNum(a.damage)) { g.damage += a.damage; g.hasDamage = true; }
+        g.last = a;
       });
+      out.push(L("协作讨伐 " + order.length + " 个世界首领,共 " + asst.rows.length + " 次", "ok"));
+      order.forEach(function (bk) {
+        var g = byBoss[bk], a = g.last, bits = [];
+        if (isNum(a.myAttemptCount) && isNum(a.maxAttemptCount)) {
+          bits.push("协作 " + N(a.myAttemptCount) + "/" + N(a.maxAttemptCount) + " 次");
+        } else {
+          bits.push("协作 " + N(g.times) + " 次");
+        }
+        if (g.hasDamage) bits.push("累计伤害 " + N(g.damage));
+        if (isNum(a.myDamagePercent)) bits.push("伤害占比 " + N(a.myDamagePercent) + "%");
+        if (isNum(a.hpPercent)) bits.push("首领剩余血量 " + N(a.hpPercent) + "%");
+        if (a.status && a.status !== "active") bits.push(PGL.worldStatus(a.status));
+        out.push(L(g.name + ":" + bits.join(" · "), "", 1));
+      });
+      asst.notes.forEach(function (n) { out.push(L(n, "muted", 1)); });
     }
     // 实测 worldStatus 返回的是实例数组(每项 bossKey/status/hpPercent/participantCount),
     // 不是单个对象。旧写法读 d.status.status 对数组恒为 undefined,这行从来没渲染过。
@@ -537,7 +564,11 @@
         out.push(L("跳过 " + sk.rows.length + " 个首领:", "muted"));
         sk.rows.forEach(function (s) {
           var chance = s.forecast && s.forecast.chance != null ? "(预测胜率 " + N(s.forecast.chance) + "%)" : "";
-          out.push(L((s.name || s.bossKey || "未知首领") + " —— " + (s.reason || "未记录原因") + chance, "muted", 1));
+          // 服务端原话照登不改写 —— 地图首领被拦时它说的是「今日挑战次数已用尽。」,
+          // 而实测地图首领不受每日次数限制、只受刷新时间限制,这句措辞会把人带偏。
+          // 后面附上服务端自报的刷新规则,让日志自己说清楚到底在等什么。
+          var refresh = s.refreshText ? "(" + s.refreshText + ")" : "";
+          out.push(L((s.name || s.bossKey || "未知首领") + " —— " + (s.reason || "未记录原因") + chance + refresh, "muted", 1));
         });
       }
     }
