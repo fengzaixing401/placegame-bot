@@ -350,12 +350,28 @@ check("公会分红", g.dividend?.dividend === 500);
 
 const bm = await service.run("fzx401", (api, row) => actions["boss.map"](api, row));
 const bmSkip = (key) => bm.skipped.find((s) => s.bossKey === key);
-// 普通档不扣门票,所以 useTickets:false 也能打;被拦的只该是行级封锁与胜率不足那两个
+// 普通档不扣门票,所以 useTickets:false 也能打;被拦的只该是行级封锁与胜率不足那两个。
+// boss_w 也在里面:游戏里「地图首领」那一栏是 12 个 = type=map 5 个 + type=world 7 个,
+// 那 7 个在这一栏是可挑战目标(受地图规则约束),在世界首领面板才是协作目标。
 check(
   "只打得动的才打",
-  bm.attempted.length === 3 &&
-    ["boss_map_1", "boss_map_2", "boss_map_4"].every((k) => bm.attempted.some((x) => x.bossKey === k)),
+  bm.attempted.length === 4 &&
+    ["boss_map_1", "boss_map_2", "boss_map_4", "boss_w"].every((k) => bm.attempted.some((x) => x.bossKey === k)),
   JSON.stringify({ a: bm.attempted.map((x) => x.bossKey), s: bm.skipped.map((s) => `${s.bossKey}:${s.reason}`) })
+);
+// 这一条单拎出来:早先 boss.map 只传 types:[MAP],12 个里那 7 个从没被挑战过 ——
+// 这就是"地图首领没有全部挑战"的真因,不是刷新时间也不是次数限制。
+check(
+  "世界首领在地图这一栏会被当挑战目标",
+  bm.attempted.some((x) => x.bossKey === "boss_w") && !bmSkip("boss_w"),
+  JSON.stringify({ a: bm.attempted.map((x) => x.bossKey), s: bm.skipped.map((s) => `${s.bossKey}:${s.reason}`) })
+);
+// 协作闸门不该干扰挑战:boss_w 的 assistBlockedReason 是有值的(场次未开放),
+// 但那只拦协作。拿它拦挑战会让这 7 个又整批消失。
+check(
+  "协作闸门不影响挑战判定",
+  bm.attempted.some((x) => x.bossKey === "boss_w"),
+  JSON.stringify({ assistBlocked: worldAssistBlocked, a: bm.attempted.map((x) => x.bossKey) })
 );
 // blockedReason 为空串是"可挑战"(真号 21 个首领全是空串),不能反过来当阻挡
 check("空串 blockedReason 不算阻挡", !bmSkip("boss_map_1") && !bmSkip("boss_map_4"), JSON.stringify(bm.skipped.map((s) => s.bossKey)));

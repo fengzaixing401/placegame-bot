@@ -58,10 +58,15 @@ export function buildActions(config) {
 
     // 三类首领三个动作,各自只碰自己那类 —— 页面上是三个面板,难度与名单都不共用。
     // types 写死成本类型:否则一个动作会顺带打掉另一类的次数。
+    // 地图首领这一栏在游戏里是 12 个:接口 type=map 的 5 个,加上 type=world 的 7 个。
+    // 那 7 个在两种玩法里各受一套规则约束 —— 在地图首领这边是"挑战"(带难度、胜率、门票,
+    // blockedReason 判闸),在世界首领那边是"协作"(assistBlockedReason 判闸,没有难度)。
+    // 实测这 7 个的 blockedReason 为空、attempts=1、difficulties 三档齐全且票价 0/1/2,
+    // 与地图首领完全同构;早先只打 type=map 的 5 个,等于 12 个里 7 个从没挑战过。
     "boss.map": async (api, row, args = {}) => {
       const r = withOverride(rules(row).boss, args?.rules);
       return boss.runBosses(api, {
-        types: [boss.BOSS_TYPE.MAP],
+        types: [boss.BOSS_TYPE.MAP, boss.BOSS_TYPE.WORLD],
         rules: r,
         maxChallenges: args?.maxChallenges ?? r.maxChallengesPerRun,
         dryRun: args?.dryRun === true

@@ -87,7 +87,10 @@ const DEFAULTS = {
       buffKey: "",
       affixKey: "",
       useMaterialBoost: false,
-      maxChallengesPerRun: 5
+      // 防跑飞的刹车,不是玩法上限 —— 真正的限制由服务端 blockedReason 与
+      // 个人首领的共享池决定。地图首领这一栏是 12 个(type=map 5 + type=world 7),
+      // 填小于 12 会静默截掉后面几个,所以默认给 12。
+      maxChallengesPerRun: 12
     },
     activity: {
       enabled: true,

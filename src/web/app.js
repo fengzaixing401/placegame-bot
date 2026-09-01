@@ -728,7 +728,12 @@ function bossGates(r, { ticketHint }) {
     hint: "0 = 不看胜率。与上面两项一样,个人首领和地图首领共用这一组设置",
     required: true
   });
-  const maxRun = fNum("本次最多挑战次数", r.boss?.maxChallengesPerRun, { min: 1, max: 50, required: true });
+  const maxRun = fNum("本次最多挑战次数", r.boss?.maxChallengesPerRun, {
+    min: 1,
+    max: 50,
+    hint: "防跑飞的刹车。地图首领这一栏有 12 个,填小于 12 会把后面几个静默截掉",
+    required: true
+  });
   return {
     nodes: [useTickets.node, requireWin.node, minWin.node, maxRun.node],
     into: (out) => {
@@ -793,13 +798,19 @@ function panelBossPersonal(r, opts) {
 
 // 地图首领:刷新周期短,默认打列表里所有可挑战的。
 function panelBossMap(r, opts) {
-  const rows = bossesOf(opts, "map");
+  // 游戏里「地图首领」这一栏是 12 个:接口 type=map 的 5 个 + type=world 的 7 个。
+  // 那 7 个在这里是可挑战目标(受地图规则约束),在世界首领面板才是协作目标 ——
+  // 同一个首领两种玩法各一套规则,所以两个面板都要列出它。
+  const rows = [...bossesOf(opts, "map"), ...bossesOf(opts, "world")];
   let list;
   const difficulty = fDifficulty("难度", r.boss?.difficulty, opts?.difficulties, {
     onChange: () => list.refresh()
   });
   list = fBossList("要打哪几个", r.boss?.mapBosses, rows, {
     allowAll: true,
+    hint:
+      "共 12 个。其中 7 个同时也是世界首领 —— 在这里是挑战(用本面板的难度与闸门)," +
+      "在世界首领面板是协作(只参与、没有难度)。两种玩法各走各的规则,互不影响",
     describe: (row) => bossRowHint(row, difficulty.read())
   });
   const gates = bossGates(r, {
