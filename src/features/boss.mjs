@@ -69,6 +69,30 @@ export async function listBosses(api, { type } = {}) {
   return type ? bosses.filter((b) => b.type === type) : bosses;
 }
 
+// 取首领名单是所有首领动作的第一步,这一个 GET 抖一下整轮就没了 ——
+// 实测 boss.world 有一轮整个任务 status=error、result_json 为空,7 个首领一个都没打,
+// 就因为这里超时。api-client 已经按 800/2000ms 退避重试过两次(前后约 3 秒),
+// 但游戏服务端抽风(实测会返 Cloudflare 502)往往比这更久,所以隔一段时间再试一次。
+//
+// 只补一次、间隔固定,不做指数退避:世界首领的场次窗口是 1 小时,幂等键按窗口算,
+// 这一轮错过就得等下一个窗口,值得多花十几秒;但再多试也只是把窗口耗在等待上。
+const SNAPSHOT_RETRY_MS = 12000;
+
+async function bossesOrNull(api, type, out) {
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    try {
+      return await listBosses(api, { type });
+    } catch (err) {
+      if (attempt === 2) {
+        out.errors.push({ step: "listBosses", error: err.message });
+        return null;
+      }
+      await new Promise((r) => setTimeout(r, SNAPSHOT_RETRY_MS));
+    }
+  }
+  return null;
+}
+
 // 一次 dynamic-view 取首领列表。次数信息在每个个人首领自己的 personalAttemptPool 里,
 // 玩家快照里没有汇总字段,所以不再单独抽一份出来。
 export async function bossSnapshot(api) {
@@ -264,7 +288,10 @@ export async function runBosses(api, { types, rules = {}, maxChallenges = 5, dry
   // 调用方显式指定类型(三个动作各打一类)。缺省只打地图首领 ——
   // 个人首领次数有限,绝不能被"没指定类型"顺带打掉。
   const activeTypes = types ?? [BOSS_TYPE.MAP];
-  const { bosses } = await bossSnapshot(api);
+  // 与世界首领同一个道理:取名单的这个 GET 抖一下,整轮就废在这里。
+  // 隔一会儿补试一次,还不行就带着错误返回,不把异常抛给排程。
+  const bosses = await bossesOrNull(api, undefined, out);
+  if (!bosses) return out;
   out.freeAttemptsLeft = freeAttemptsLeft(bosses);
 
   const mapWanted = new Set([].concat(rules.mapBosses ?? []));
@@ -475,7 +502,10 @@ export async function runWorldBoss(api, { rules = {} } = {}) {
     return null;
   });
 
-  const bosses = await listBosses(api, { type: BOSS_TYPE.WORLD });
+  // 名单取不到就带着已记下的错误返回,不抛 —— 抛出去会让整个任务 status=error、
+  // result_json 为空,日志上只剩一句"请求超时",看不出这一轮到底做了什么。
+  const bosses = await bossesOrNull(api, BOSS_TYPE.WORLD, out);
+  if (!bosses) return out;
   const wanted = new Set([].concat(rules.worldBosses ?? []));
   for (const boss of bosses) {
     const key = pickKey(boss);

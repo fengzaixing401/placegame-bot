@@ -41,6 +41,9 @@ let worldStatusRows = [
 ];
 // 世界首领行的协作闸门,用例要分别覆盖"可协作"与"场次已结束"
 let worldAssistBlocked = "";
+// dynamic-view 连续失败几次。取首领名单就靠这个端点,它抖一下整轮首领任务就没了 ——
+// 真号上有一轮 boss.world 整个任务 status=error、result_json 为空,7 个首领一个都没打。
+let viewFailures = 0;
 
 // 协作场次的可变状态。真号实测每场次 maxAttemptCount=3,assist 响应自带 worldBoss 段,
 // 循环协作就是靠它驱动的 —— 假响应少了这段,循环会走"读不到次数就停手",
@@ -89,6 +92,16 @@ function fakeFetch(url, opts = {}) {
       return reply({ idlePreview: { validSeconds: 39600, exp: 900, gold: 400 } });
 
     case "/api/client/dynamic-view":
+      // 注入快照失败:503 会一路穿过 api-client 的退避重试抛成 ApiError,
+      // 正是真号上"请求超时"那一轮的形状
+      if (viewFailures > 0) {
+        viewFailures -= 1;
+        return Promise.resolve({
+          ok: false,
+          status: 503,
+          text: () => Promise.resolve(JSON.stringify({ ok: false, error: "请求超时。" }))
+        });
+      }
       return reply({
         maps: [{ key: "map_1", name: "森林", current: true }],
         // 字段照真号形状造:可挑战 = blockedReason 为空串;顶层没有 available,
@@ -520,6 +533,73 @@ worldAssistBlocked = "";
 // 点了名就只协作名单里那几个
 const wbNamed = await service.run("fzx401", (api) => bossFeature.runWorldBoss(api, { rules: { worldBosses: ["别的首领"] } }));
 check("点名后不在名单里的不协作", wbNamed.assisted.length === 0 && wbNamed.skipped.length === 0, JSON.stringify(wbNamed.assisted));
+
+// ---- 取首领名单失败时的兜底 ----
+// 真号上有一轮 boss.world 整个任务 status=error、result_json 为空,7 个首领一个都没打,
+// 就因为取名单那个 GET 超时了。api-client 已经退避重试过两次(前后约 3 秒),
+// 但游戏服务端抽风往往比这更久,所以隔一段时间再补试一次。
+//
+// 这几条要跑的路径带 12 秒补试等待与 800/2000ms 退避,真睡下来这一节要空等半分钟。
+// 换成"立刻回调"。阈值卡在 13 秒:要盖住 12 秒的补试,又必须留住客户端 15 秒的 abort
+// 计时器 —— 那条也走 setTimeout,一起加速就等于每个请求都立刻 abort。
+const unpatchedTimer = globalThis.setTimeout;
+globalThis.setTimeout = (fn, ms, ...rest) =>
+  ms > 0 && ms < 13000 ? unpatchedTimer(fn, 0, ...rest) : unpatchedTimer(fn, ms, ...rest);
+
+resetAssist();
+// 3 次 = 头一轮的 1 次 + 2 次退避重试全用光,补试那次才拿到名单
+viewFailures = 3;
+const callsBeforeFlaky = calls.length;
+const wbFlaky = await service.run("fzx401", (api) => bossFeature.runWorldBoss(api, { rules: {} }));
+const flakyViews = calls.slice(callsBeforeFlaky).filter((c) => c.path === "/api/client/dynamic-view").length;
+check(
+  "取名单先失败后补试成功,整轮照常协作",
+  flakyViews === 4 &&
+    viewFailures === 0 &&
+    wbFlaky.assisted.length === 3 &&
+    !wbFlaky.errors.some((e) => e.step === "listBosses"),
+  JSON.stringify({ views: flakyViews, assisted: wbFlaky.assisted.length, errors: wbFlaky.errors })
+);
+
+// 补试也失败:必须带着错误正常返回。抛出去会让整个任务 status=error、result_json 为空,
+// 日志上只剩一句"请求超时",看不出这一轮到底做了什么。
+resetAssist();
+viewFailures = 6;
+let wbDead;
+let wbThrew = null;
+try {
+  wbDead = await service.run("fzx401", (api) => bossFeature.runWorldBoss(api, { rules: {} }));
+} catch (err) {
+  wbThrew = err.message;
+}
+// 这一条只管"不抛、记错误",不连带断言补试了几次 —— 补试次数由上一条守。
+check(
+  "取名单两次都失败不抛异常,只记错误",
+  wbThrew === null &&
+    wbDead?.errors.some((e) => e.step === "listBosses") &&
+    wbDead.assisted.length === 0,
+  JSON.stringify({ threw: wbThrew, result: wbDead })
+);
+
+// 地图首领走的是另一个入口(runBosses),同样不能把异常扔给排程
+viewFailures = 6;
+let bmDead;
+let bmThrew = null;
+try {
+  bmDead = await service.run("fzx401", (api, row) => actions["boss.map"](api, row));
+} catch (err) {
+  bmThrew = err.message;
+}
+check(
+  "地图首领取名单失败同样不抛",
+  bmThrew === null &&
+    bmDead?.errors.some((e) => e.step === "listBosses") &&
+    bmDead.attempted.length === 0,
+  JSON.stringify({ threw: bmThrew, result: bmDead })
+);
+viewFailures = 0;
+globalThis.setTimeout = unpatchedTimer;
+resetAssist();
 
 worldStatusRows = [
   { instanceId: "wb_boss_w_fixed_20", bossKey: "boss_w", status: "active",
