@@ -468,6 +468,17 @@ freeAttempts = 3;
 const bpFree = await runPersonal({ personalBosses: ["boss_pig"], useTickets: false });
 check("免费次数够则正常打", bpFree.attempted.some((x) => x.bossKey === "boss_pig"), JSON.stringify(bpFree.skipped));
 
+// 整轮次数可以超过免费额度(超出部分扣门票),但"免费余"不能显示成负数 ——
+// 真号上出现过免费余 2 打了 5 次、日志写"免费余 -3"。
+freeAttempts = 2;
+const bpOverFree = await runPersonal({ personalBosses: ["boss_pig"], useTickets: true, personalMaxPerDay: 5 });
+check(
+  "打的次数超过免费额度时免费余不为负",
+  bpOverFree.attempted.length === 5 && bpOverFree.freeAttemptsLeft === 0,
+  JSON.stringify({ attempted: bpOverFree.attempted.length, free: bpOverFree.freeAttemptsLeft })
+);
+freeAttempts = 3;
+
 // 世界首领:只参与协作讨伐 + 领奖,不主动挑战 —— 主攻会按困难/噩梦档扣门票,与本意相反。
 // 协作闸门在首领行的 assistBlockedReason / worldInstance 上,不在 world-status 接口。
 resetAssist();

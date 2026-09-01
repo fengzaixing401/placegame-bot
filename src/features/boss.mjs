@@ -415,8 +415,10 @@ export async function runBosses(api, { types, rules = {}, maxChallenges = 5, dry
 
       const result = await challenge(api, key, bossRules);
       out.attempted.push({ ...label, dryRun: false, forecast, win: result?.battle?.win, result });
+      // 夹在 0:整轮次数可以超过免费额度(超出部分扣门票),真号上出现过
+      // 免费余 4 打了 5 次、日志显示"免费余 -1"。免费次数不存在负数。
       if (boss.type === BOSS_TYPE.PERSONAL && typeof out.freeAttemptsLeft === "number") {
-        out.freeAttemptsLeft -= 1;
+        out.freeAttemptsLeft = Math.max(0, out.freeAttemptsLeft - 1);
       }
     } catch (err) {
       out.errors.push({ ...label, error: err.message });
