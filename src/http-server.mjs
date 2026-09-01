@@ -307,8 +307,11 @@ export function createHttpServer({ config, service, store, settings, scheduler, 
 
   // 改 WebUI 密码。须验旧密码 —— 会话被劫持也不能直接换掉密码把人锁在外面。
   route("POST", /^\/api\/web\/password$/, async (_m, body, ctx) => {
+    // 旧密码不对返 400 而不是 401:请求本身是带着有效会话进来的,不是没鉴权。
+    // 页面上的 guarded() 把 401/403 一律当会话过期(清 csrf、跳回登录页),
+    // 用 401 会让"当前密码错误"变成"登录状态已失效",真实原因被吞掉。
     if (!settings.verifyWebPassword(body?.currentPassword)) {
-      throw Object.assign(new Error("当前密码错误"), { status: 401 });
+      throw Object.assign(new Error("当前密码错误"), { status: 400 });
     }
     settings.setWebPassword(body?.newPassword);
     settings.destroyOtherSessions(ctx.sessionToken);
@@ -320,8 +323,9 @@ export function createHttpServer({ config, service, store, settings, scheduler, 
     if (!settings.webPasswordSet) {
       throw Object.assign(new Error("请先设置 WebUI 密码"), { status: 409 });
     }
+    // 同上:密码填错是请求体的问题,401 会被 guarded() 误判成会话过期
     if (!settings.verifyWebPassword(body?.currentPassword)) {
-      throw Object.assign(new Error("WebUI 密码错误"), { status: 401 });
+      throw Object.assign(new Error("WebUI 密码错误"), { status: 400 });
     }
     const token = body?.token ? String(body.token) : generateToken();
     settings.setApiToken(token);

@@ -757,19 +757,34 @@ function panelBossPersonal(r, opts) {
       (typeof free === "number" ? `。当前剩余免费次数 ${free}` : ""),
     describe: (row) => bossRowHint(row, difficulty.read())
   });
+  // 次数是整轮预算,不是每个首领各算一次:服务端的免费/门票池是共享一池。
+  // 填到 5 以上才会动门票,所以这一项同时是门票消耗的开关。
+  const perDay = fNum("一天打几次", r.boss?.personalMaxPerDay, {
+    min: 0,
+    max: 10,
+    hint: "免费 5 次 + 门票最多 5 次,共享一池。填 5 = 只用完免费次数;填超过 5 才会动门票",
+    required: true
+  });
+  const at = fTime("每天几点打", r.boss?.personalAt, "北京时间。免费次数按北京时间每日重置");
   const schedule = fBool("加入自动排程", r.boss?.challengePersonal, "只影响自动排程与「一键全部日常」;这个面板按确定执行不受它限制");
   const gates = bossGates(r, {
     ticketHint: "免费次数用尽后服务端会自动扣票;关闭则次数用尽就停手。与地图首领共用这项设置"
   });
 
-  const payload = () =>
-    gates.into({
+  const payload = () => {
+    const out = gates.into({
       personalDifficulty: difficulty.read(),
       personalBosses: list.read(),
       challengePersonal: schedule.read()
     });
+    const n = perDay.read();
+    if (n !== null) out.personalMaxPerDay = n;
+    const t = at.read();
+    if (t !== null) out.personalAt = t;
+    return out;
+  };
   return {
-    node: el("div", { className: "op-form" }, difficulty.node, list.node, schedule.node, ...gates.nodes),
+    node: el("div", { className: "op-form" }, difficulty.node, list.node, perDay.node, at.node, schedule.node, ...gates.nodes),
     // 整块覆盖:面板里取消勾选必须能生效,逐字段兜底会让取消永远无效
     read: () => ({ rules: payload() }),
     toRules: () => ({ boss: payload() })
@@ -956,15 +971,6 @@ function rulesForm(r) {
     section("首领", [
       ["enabled", fBool("排程执行", r.boss?.enabled, "关掉则三类首领都不自动执行")],
       ["mapIntervalHours", fNum("地图首领间隔(小时)", r.boss?.mapIntervalHours, { min: 1, max: 24, required: true })],
-      [
-        "personalIntervalHours",
-        fNum("个人首领间隔(小时)", r.boss?.personalIntervalHours, {
-          min: 1,
-          max: 48,
-          hint: "免费次数按北京时间每日重置,填 24 即可。要不要排程在个人首领面板里勾",
-          required: true
-        })
-      ],
       [
         "worldWindows",
         fRows(

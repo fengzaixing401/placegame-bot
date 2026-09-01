@@ -63,7 +63,12 @@ const DEFAULTS = {
       personalDifficulty: "normal",
       // 留空 = 一个都不打(与地图首领相反)。这是个人首领的安全闸门
       personalBosses: [],
-      personalIntervalHours: 24, // 免费次数按北京时间每日重置
+      // 每天几点打。免费次数按北京时间每日重置,所以按时刻排比按间隔排更贴合
+      personalAt: "09:00",
+      // 一天打几次。这是整轮预算,不是每个首领各算 —— 服务端的
+      // personalAttemptPool 是共享一池(免费 5 + 门票 5)。
+      // 默认 5 = 只用完免费次数,不碰门票;要动门票就填到 5 以上
+      personalMaxPerDay: 5,
       // 世界首领:只参与协作讨伐,没有难度也没有胜率预测。留空 = 全部参与
       worldBosses: [],
       worldWindows: [

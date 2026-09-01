@@ -154,11 +154,11 @@ export class Scheduler {
       rolling("boss.map", rules.boss.mapIntervalHours);
       // 个人首领要显式开 challengePersonal 才排程:每日免费次数有限,
       // 用完服务端就自动扣门票,不该默认自动消耗。
-      if (rules.boss.challengePersonal === true) {
-        jobs.push({
-          key: "boss.personal",
-          idem: `boss.personal:${slot(rules.boss.personalIntervalHours ?? 24)}`
-        });
+      // 免费次数按北京时间每日重置,所以按"每天到点打一次"排,幂等键取当天日期。
+      // 早先按 personalIntervalHours 切绝对时间片,24 小时片的片界落在 UTC 00:00
+      // (北京 08:00),与游戏的重置时刻错开,实际起跑时刻会随时区漂。
+      if (rules.boss.challengePersonal === true && parts.minutes >= toMinutes(rules.boss.personalAt ?? "09:00")) {
+        jobs.push({ key: "boss.personal", idem: `boss.personal:${parts.date}` });
       }
       const win = activeWindow(parts, rules.boss.worldWindows);
       if (win) jobs.push({ key: "boss.world", idem: `boss.world:${parts.date}:${win}` });

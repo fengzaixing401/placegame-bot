@@ -562,6 +562,81 @@ check(
   JSON.stringify(planAt("2026-08-31T04:03:00.000Z", { "boss.map": "坏值" }))
 );
 
+// 个人首领按"每天到点打一次"排,不再按间隔切绝对时间片:免费次数是北京时间每日重置的,
+// 24 小时片的片界落在 UTC 00:00(北京 08:00),与重置时刻错开。
+// personalAt 是北京时间,zonedParts 已按 Asia/Shanghai 折算,所以 09:00 = UTC 01:00。
+const perRules = {
+  boss: {
+    enabled: true,
+    mapIntervalHours: 2,
+    challengePersonal: true,
+    personalAt: "09:00",
+    worldWindows: []
+  }
+};
+const perAt = (iso) => {
+  const now = new Date(iso);
+  return scheduler.plannedJobs(perRules, zonedParts(now, config.timezone), now, () => null);
+};
+const perKeys = (iso) => perAt(iso).map((j) => j.key);
+check(
+  "没到点不排个人首领",
+  !perKeys("2026-08-31T00:30:00.000Z").includes("boss.personal"),
+  JSON.stringify(perAt("2026-08-31T00:30:00.000Z"))
+);
+check(
+  "到点就排,幂等键按当天日期(一天只跑一轮)",
+  perAt("2026-08-31T01:00:00.000Z").find((j) => j.key === "boss.personal")?.idem === "boss.personal:2026-08-31",
+  JSON.stringify(perAt("2026-08-31T01:00:00.000Z"))
+);
+check(
+  "同一天晚些时候幂等键不变",
+  perAt("2026-08-31T15:00:00.000Z").find((j) => j.key === "boss.personal")?.idem === "boss.personal:2026-08-31",
+  JSON.stringify(perAt("2026-08-31T15:00:00.000Z"))
+);
+check(
+  "没开 challengePersonal 就一直不排",
+  !scheduler
+    .plannedJobs(
+      { boss: { ...perRules.boss, challengePersonal: false } },
+      zonedParts(new Date("2026-08-31T15:00:00.000Z"), config.timezone),
+      new Date("2026-08-31T15:00:00.000Z"),
+      () => null
+    )
+    .map((j) => j.key)
+    .includes("boss.personal")
+);
+
+// 个人首领的次数是整轮预算 —— 服务端的池子是共享一池(实测免费 5 + 门票 5)。
+// 早先"点名的每个首领各打一次"让只点了一个首领的账号每天只用掉 1 次。
+const poolRow = (over = {}) => [
+  { personalAttemptPool: { freeRemaining: 5, freeLimit: 5, ticketUsed: 0, ticketLimit: 5, ...over } }
+];
+const budget = (rows, rules, useTickets) => bossFeature.personalBudget(rows, rules, useTickets);
+check(
+  "预算取用户设的次数",
+  budget(poolRow(), { personalMaxPerDay: 3 }, false) === 3
+);
+check(
+  "不允许用票时,预算封顶在剩余免费次数",
+  budget(poolRow({ freeRemaining: 2 }), { personalMaxPerDay: 10 }, false) === 2
+);
+check(
+  "允许用票时,免费加门票一起算容量",
+  budget(poolRow({ freeRemaining: 2 }), { personalMaxPerDay: 10 }, true) === 7
+);
+check(
+  "门票已用掉一部分就不重复计入",
+  budget(poolRow({ freeRemaining: 0, ticketUsed: 3 }), { personalMaxPerDay: 10 }, true) === 2
+);
+check(
+  "免费用尽且不许用票时预算为 0",
+  budget(poolRow({ freeRemaining: 0 }), { personalMaxPerDay: 5 }, false) === 0
+);
+// 读不到池子就不猜次数,退回老行为打一次
+check("读不到池子时预算为 1", budget([{}], {}, false) === 1);
+check("没设次数时按池子容量吃满", budget(poolRow(), {}, false) === 5);
+
 console.log("\n[4] 必带请求头");
 const c = calls.find((x) => x.path === "/api/battle/idle-collect");
 check("client-version", c.headers["x-placegame-client-version"] === "0.2.50");
@@ -849,9 +924,11 @@ check(
   "ready 报令牌来源转为 db",
   (await call("GET", "/health/ready", { token: null })).json.data.apiTokenSource === "db"
 );
+// 400 而不是 401:请求带着有效会话,只是密码填错了。页面上的 guarded() 把 401/403
+// 当会话过期处理(清 csrf、跳回登录页),用 401 会把"密码错误"显示成"登录已失效"。
 check(
-  "轮换需密码",
-  (await call("POST", "/api/web/api-token", { token: null, cookie, csrf, body: { currentPassword: "wrong" } })).status === 401
+  "轮换需密码,密码错返 400 而非 401",
+  (await call("POST", "/api/web/api-token", { token: null, cookie, csrf, body: { currentPassword: "wrong" } })).status === 400
 );
 
 // 改密:验旧密码,且作废其他会话
@@ -859,8 +936,8 @@ const other = await call("POST", "/api/web/login", { token: null, ip: "10.0.0.11
 const otherCookie = (other.setCookie[0] ?? "").split(";")[0];
 check("第二个会话可用", (await call("GET", "/accounts", { token: null, cookie: otherCookie })).status === 200);
 check(
-  "改密需旧密码",
-  (await call("POST", "/api/web/password", { token: null, cookie, csrf, body: { currentPassword: "wrong", newPassword: "a".repeat(12) } })).status === 401
+  "改密需旧密码,密码错返 400 而非 401",
+  (await call("POST", "/api/web/password", { token: null, cookie, csrf, body: { currentPassword: "wrong", newPassword: "a".repeat(12) } })).status === 400
 );
 const NEW_PW = "another-long-password-99";
 const changed = await call("POST", "/api/web/password", {

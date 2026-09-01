@@ -17,6 +17,22 @@ export function attemptPool(row) {
   return pool && typeof pool === "object" ? pool : null;
 }
 
+// 个人首领整轮能打几次。池子是共享的,取任意一个带池子的首领即可。
+//   容量 = 剩余免费次数 +(允许用票时)还没用掉的门票额度
+//   预算 = min(用户设的每日次数, 容量)
+// 读不到池子时给 1:不猜次数,保持"至少按老行为打一次"。
+export function personalBudget(rows = [], rules = {}, useTickets = false) {
+  const wanted = num(rules.personalMaxPerDay);
+  const pool = rows.map(attemptPool).find(Boolean);
+  if (!pool) return wanted === null ? 1 : Math.max(1, wanted);
+
+  const free = num(pool.freeRemaining) ?? 0;
+  const ticketLeft = useTickets ? Math.max(0, (num(pool.ticketLimit) ?? 0) - (num(pool.ticketUsed) ?? 0)) : 0;
+  const capacity = free + ticketLeft;
+  if (wanted === null) return capacity;
+  return Math.max(0, Math.min(wanted, capacity));
+}
+
 // 能否挑战:真实字段只有 blockedReason(空串=可挑战)。
 // 顶层没有 available,也没有 remainingAttemptCount —— 21 个首领的字段全集里都不存在,
 // 早先读这两个等于恒真,拿不到任何拦截效果。
@@ -235,6 +251,16 @@ export async function runBosses(api, { types, rules = {}, maxChallenges = 5, dry
     errors: []
   };
 
+  // 个人首领按预算重复排进候选(见下面的 personalBudget),同一个首领被同一个原因
+  // 拦住时只记一条 —— 否则一句「免费次数已用尽」会在日志里刷满整个预算的遍数。
+  const skipSeen = new Set();
+  const skip = (entry) => {
+    const tag = `${entry.bossKey ?? ""}|${entry.reason ?? ""}`;
+    if (skipSeen.has(tag)) return;
+    skipSeen.add(tag);
+    out.skipped.push(entry);
+  };
+
   // 调用方显式指定类型(三个动作各打一类)。缺省只打地图首领 ——
   // 个人首领次数有限,绝不能被"没指定类型"顺带打掉。
   const activeTypes = types ?? [BOSS_TYPE.MAP];
@@ -251,7 +277,7 @@ export async function runBosses(api, { types, rules = {}, maxChallenges = 5, dry
     if (boss.type === BOSS_TYPE.PERSONAL) {
       // 个人首领只打点名的:留空不等于"全打",否则等于没有设置过程
       if (personalWanted.size === 0) {
-        out.skipped.push({ bossKey: pickKey(boss), name: boss.name, reason: "未在 personalBosses 中列出" });
+        skip({ bossKey: pickKey(boss), name: boss.name, reason: "未在 personalBosses 中列出" });
         continue;
       }
       if (!listed(personalWanted, boss)) continue;
@@ -259,6 +285,21 @@ export async function runBosses(api, { types, rules = {}, maxChallenges = 5, dry
       continue;
     }
     candidates.push(boss);
+  }
+
+  // 个人首领的次数是整轮预算,不是每个首领各算一次:服务端的 personalAttemptPool
+  // 是共享一池(实测 freeLimit 5 + ticketLimit 5)。早先"点名的每个首领各打一次"
+  // 让只点了一个首领的账号每天只用掉 1 次,剩下 4 次免费白放过期。
+  //
+  // 预算取三者最小:用户设的每日次数、池子还剩多少、以及门票闸门允许不允许动票。
+  // 读不到池子就退回 1(不猜次数),循环体里的闸门仍会逐次复核。
+  if (activeTypes.includes(BOSS_TYPE.PERSONAL) && candidates.length > 0) {
+    const budget = personalBudget(candidates, rules, out.gate.useTickets);
+    const cycle = candidates.filter((b) => b.type === BOSS_TYPE.PERSONAL);
+    if (cycle.length > 0 && budget > cycle.length) {
+      // 轮转补齐:点名 2 个、预算 5 次 => A B A B A
+      for (let i = cycle.length; i < budget; i += 1) candidates.push(cycle[i % cycle.length]);
+    }
   }
 
   for (const boss of candidates) {
@@ -273,7 +314,7 @@ export async function runBosses(api, { types, rules = {}, maxChallenges = 5, dry
     const label = { bossKey: key, name: boss.name, difficulty, refreshText: boss.refreshText ?? null };
     const reason = blockedReason(boss, difficulty);
     if (reason) {
-      out.skipped.push({ ...label, reason });
+      skip({ ...label, reason });
       continue;
     }
 
@@ -287,21 +328,21 @@ export async function runBosses(api, { types, rules = {}, maxChallenges = 5, dry
       // 读不到该档时回落到本地表 —— 恰好 cost===null 就是读不到那档的情形。
       const dName = difficultyDetail(boss, difficulty)?.name ?? difficultyLabel(difficulty);
       if (cost === null) {
-        out.skipped.push({ ...label, reason: `读不到「${dName}」难度的门票消耗,已按不使用门票跳过` });
+        skip({ ...label, reason: `读不到「${dName}」难度的门票消耗,已按不使用门票跳过` });
         continue;
       }
       if (cost > 0) {
-        out.skipped.push({ ...label, reason: `「${dName}」难度要扣 ${cost} 张门票,未允许使用门票` });
+        skip({ ...label, reason: `「${dName}」难度要扣 ${cost} 张门票,未允许使用门票` });
         continue;
       }
       if (attemptPool(boss)) {
         const left = out.freeAttemptsLeft;
         if (left === null) {
-          out.skipped.push({ ...label, reason: "读不到免费次数,已按不使用门票跳过" });
+          skip({ ...label, reason: "读不到免费次数,已按不使用门票跳过" });
           continue;
         }
         if (left <= 0) {
-          out.skipped.push({ ...label, reason: "免费次数已用尽,且未允许使用门票" });
+          skip({ ...label, reason: "免费次数已用尽,且未允许使用门票" });
           continue;
         }
       }
@@ -324,7 +365,7 @@ export async function runBosses(api, { types, rules = {}, maxChallenges = 5, dry
         const baseline = readForecast(difficultyDetail(boss, difficulty));
         const preRejected = winGate(baseline, out.gate);
         if (preRejected) {
-          out.skipped.push({ ...label, reason: preRejected, forecast: baseline, source: "难度档预估" });
+          skip({ ...label, reason: preRejected, forecast: baseline, source: "难度档预估" });
           continue;
         }
 
@@ -334,13 +375,13 @@ export async function runBosses(api, { types, rules = {}, maxChallenges = 5, dry
         try {
           previewed = await preview(api, key, bossRules);
         } catch (err) {
-          out.skipped.push({ ...label, reason: `预览失败,未挑战:${err.message}` });
+          skip({ ...label, reason: `预览失败,未挑战:${err.message}` });
           continue;
         }
         forecast = readForecast(previewed);
         const rejected = winGate(forecast, out.gate);
         if (rejected) {
-          out.skipped.push({ ...label, reason: rejected, forecast });
+          skip({ ...label, reason: rejected, forecast });
           continue;
         }
       }
