@@ -728,21 +728,16 @@ function bossGates(r, { ticketHint }) {
     hint: "0 = 不看胜率。与上面两项一样,个人首领和地图首领共用这一组设置",
     required: true
   });
-  const maxRun = fNum("本次最多挑战次数", r.boss?.maxChallengesPerRun, {
-    min: 1,
-    max: 50,
-    hint: "防跑飞的刹车。地图首领这一栏有 12 个,填小于 12 会把后面几个静默截掉",
-    required: true
-  });
+  // 次数上限不在这里:个人首领用 personalMaxPerDay(在个人面板),
+  // 地图首领用 mapMaxPerRun(在地图面板)。两类数量与玩法都不同,
+  // 共用一个上限会让一边的设置卡住另一边。
   return {
-    nodes: [useTickets.node, requireWin.node, minWin.node, maxRun.node],
+    nodes: [useTickets.node, requireWin.node, minWin.node],
     into: (out) => {
       out.useTickets = useTickets.read();
       out.requirePredictedWin = requireWin.read();
       const mw = minWin.read();
-      const mx = maxRun.read();
       if (mw !== null) out.minWinChance = mw;
-      if (mx !== null) out.maxChallengesPerRun = mx;
       return out;
     }
   };
@@ -813,13 +808,25 @@ function panelBossMap(r, opts) {
       "在世界首领面板是协作(只参与、没有难度)。两种玩法各走各的规则,互不影响",
     describe: (row) => bossRowHint(row, difficulty.read())
   });
+  // 地图首领自己的次数上限,与个人首领的「一天打几次」互不影响
+  const maxRun = fNum("本次最多挑战几个", r.boss?.mapMaxPerRun, {
+    min: 1,
+    max: 50,
+    hint: "这一栏共 12 个,填小于 12 会把后面几个静默截掉。与个人首领的次数是两个独立设置",
+    required: true
+  });
   const gates = bossGates(r, {
     ticketHint: "困难档扣 1 张、噩梦档扣 2 张;关闭则这两档一律跳过。与个人首领共用这项设置"
   });
 
-  const payload = () => gates.into({ difficulty: difficulty.read(), mapBosses: list.read() });
+  const payload = () => {
+    const out = gates.into({ difficulty: difficulty.read(), mapBosses: list.read() });
+    const mx = maxRun.read();
+    if (mx !== null) out.mapMaxPerRun = mx;
+    return out;
+  };
   return {
-    node: el("div", { className: "op-form" }, difficulty.node, list.node, ...gates.nodes),
+    node: el("div", { className: "op-form" }, difficulty.node, list.node, maxRun.node, ...gates.nodes),
     read: () => ({ rules: payload() }),
     toRules: () => ({ boss: payload() })
   };

@@ -68,7 +68,7 @@ export function buildActions(config) {
       return boss.runBosses(api, {
         types: [boss.BOSS_TYPE.MAP, boss.BOSS_TYPE.WORLD],
         rules: r,
-        maxChallenges: args?.maxChallenges ?? r.maxChallengesPerRun,
+        maxChallenges: args?.maxChallenges ?? r.mapMaxPerRun,
         dryRun: args?.dryRun === true
       });
     },
@@ -81,7 +81,9 @@ export function buildActions(config) {
       return boss.runBosses(api, {
         types: [boss.BOSS_TYPE.PERSONAL],
         rules: r,
-        maxChallenges: args?.maxChallenges ?? r.maxChallengesPerRun,
+        // 个人首领的上限就是用户设的每日次数,不跟地图首领共用一个键。
+        // runBosses 里的 personalBudget 还会按池子余量与门票闸门再封一次顶。
+        maxChallenges: args?.maxChallenges ?? r.personalMaxPerDay,
         dryRun: args?.dryRun === true
       });
     },

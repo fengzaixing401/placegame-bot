@@ -379,6 +379,24 @@ check("行级封锁被拦下", /等级不足/.test(bmSkip("boss_map_3")?.reason 
 check("胜率不足被闸门拦下", /胜率|预测会输/.test(bmSkip("boss_low")?.reason ?? ""), JSON.stringify(bmSkip("boss_low")));
 check("挑战前先调 preview", calls.some((x) => x.path === "/api/boss/preview" && x.body?.bossKey === "boss_map_1"));
 
+// 次数上限每类首领各一个键。早先三类共用 maxChallengesPerRun,在个人首领面板
+// 填 10 会把地图首领也卡在 10(而这一栏有 12 个),两边设置互相干扰。
+const bmCap = await service.run("fzx401", (api, row) => actions["boss.map"](api, row, { rules: { mapMaxPerRun: 2 } }));
+check(
+  "地图首领吃 mapMaxPerRun 的上限",
+  bmCap.attempted.length === 2,
+  JSON.stringify(bmCap.attempted.map((x) => x.bossKey))
+);
+// 反向:个人首领的次数键不该被地图那个键左右
+const bpCap = await service.run("fzx401", (api, row) =>
+  actions["boss.personal"](api, row, { rules: { personalBosses: ["boss_pig"], personalMaxPerDay: 3, mapMaxPerRun: 1 } })
+);
+check(
+  "个人首领不受 mapMaxPerRun 影响",
+  bpCap.attempted.length === 3,
+  JSON.stringify({ a: bpCap.attempted.map((x) => x.bossKey), s: bpCap.skipped.map((s) => `${s.bossKey}:${s.reason}`) })
+);
+
 // 难度档自带的封锁只在该档体现,行级是放行的 —— 选到那档才该被拦
 const bmHard = await service.run("fzx401", (api, row) => actions["boss.map"](api, row, { rules: { difficulty: "hard", useTickets: true } }));
 check(
