@@ -1,26 +1,15 @@
-import { unwrap } from "../util.mjs";
-import { listInventory } from "./inventory.mjs";
+import { pickField } from "../util.mjs";
+import { listInventory, ITEM_KEY_FIELDS, ITEM_ID_FIELDS } from "./inventory.mjs";
 
 export async function view(api) {
-  const data = unwrap(await api.request("/api/guild/view"));
+  const data = await api.get("/api/guild/view");
   return data?.guild ?? data;
 }
 
 // 背包物品行的稳定键与实例 ID。捐献接口收的是实例 ID(官方 CLI 标 reference:true,
 // 引用失效会报"列表已失效,请重新查询"),所以规则里存 itemKey,运行时在这里换。
-function rowItemKey(row) {
-  for (const k of ["itemKey", "key", "templateKey", "itemTemplateKey"]) {
-    if (row?.[k]) return String(row[k]);
-  }
-  return null;
-}
-
-function rowItemId(row) {
-  for (const k of ["itemId", "id", "instanceId"]) {
-    if (row?.[k]) return row[k];
-  }
-  return null;
-}
+const rowItemKey = (row) => pickField(row, ITEM_KEY_FIELDS);
+const rowItemId = (row) => pickField(row, ITEM_ID_FIELDS);
 
 // 可兑换清单 = 公会仓库(guild.view 的 storage)。兑换记录实测 itemKey 就是仓库里那个键
 // (如 skill_page),与 /api/guild/redeem 收的字段同名。
@@ -28,8 +17,8 @@ function rowItemId(row) {
 // 本项目没有实现,所以不往这里塞。
 // 顺带带出 equipmentDonationMinQuality —— 公会自己设的装备捐献品质下限,页面要照它显示。
 export async function redeemableItems(api) {
-  const g = await view(api);
-  const rows = Array.isArray(g?.storage) ? g.storage : [];
+  const guild = await view(api);
+  const rows = Array.isArray(guild?.storage) ? guild.storage : [];
   return {
     items: rows
       .map((row) => ({
@@ -39,9 +28,9 @@ export async function redeemableItems(api) {
         amount: row?.amount ?? null
       }))
       .filter((r) => r.itemKey),
-    equipmentDonationMinQuality: g?.equipmentDonationMinQuality ?? null,
-    canDonate: g?.canDonate !== false,
-    donationBlockedReason: (g?.donationBlockedReason ?? "").trim() || null
+    equipmentDonationMinQuality: guild?.equipmentDonationMinQuality ?? null,
+    canDonate: guild?.canDonate !== false,
+    donationBlockedReason: (guild?.donationBlockedReason ?? "").trim() || null
   };
 }
 
@@ -56,6 +45,26 @@ export async function donatableItems(api) {
       amount: row?.amount ?? row?.count ?? row?.quantity ?? null
     }))
     .filter((r) => r.itemKey && r.itemId);
+}
+
+// WebUI 公会对面板的数据。两个清单分别对应两套不同的东西(仓库 vs 背包),
+// 接口收的字段也不同,所以分开取、分别兜错 —— 一个挂了不该把另一个也清空。
+export async function viewForOptions(api) {
+  const [bag, stock] = await Promise.all([
+    donatableItems(api).catch((err) => ({ error: err.message })),
+    redeemableItems(api).catch((err) => ({ error: err.message }))
+  ]);
+
+  return {
+    donatableItems: Array.isArray(bag) ? bag : [],
+    redeemableItems: Array.isArray(stock?.items) ? stock.items : [],
+    guild: {
+      equipmentDonationMinQuality: stock?.equipmentDonationMinQuality ?? null,
+      canDonate: stock?.canDonate !== false,
+      donationBlockedReason: stock?.donationBlockedReason ?? null
+    },
+    errors: [bag?.error, stock?.error].filter(Boolean)
+  };
 }
 
 // ④ 公会兑换 + 捐献 + 分红。
@@ -75,9 +84,15 @@ export async function dailyRoutine(api, { redeem = [], donate = [], equipmentDon
   };
   const stockRows = lazyList(async () => (await redeemableItems(api)).items);
 
+  // 规则条目既允许写成裸键("skill_page"),也允许写成 {itemKey, amount}。
+  const asEntry = (entry) => ({
+    itemKey: typeof entry === "string" ? entry : entry?.itemKey,
+    amount: typeof entry === "string" ? 1 : entry?.amount ?? 1,
+    itemId: typeof entry === "string" ? null : entry?.itemId ?? null
+  });
+
   for (const entry of redeem) {
-    const itemKey = typeof entry === "string" ? entry : entry?.itemKey;
-    const amount = typeof entry === "string" ? 1 : entry?.amount ?? 1;
+    const { itemKey, amount } = asEntry(entry);
     if (!itemKey) {
       out.errors.push({ step: "redeem", error: "缺少 itemKey", entry });
       continue;
@@ -93,9 +108,8 @@ export async function dailyRoutine(api, { redeem = [], donate = [], equipmentDon
   // 捐献:规则给的是 itemKey,这里查一次背包换成实例 itemId。背包只在真的要捐时才查。
   let bag = null;
   for (const entry of donate) {
-    const itemKey = typeof entry === "string" ? entry : entry?.itemKey;
-    const amount = typeof entry === "string" ? 1 : entry?.amount ?? 1;
-    let itemId = typeof entry === "string" ? null : entry?.itemId ?? null;
+    const { itemKey, amount, itemId: presetItemId } = asEntry(entry);
+    let itemId = presetItemId;
     let name = null;
 
     if (!itemId && !itemKey) {
@@ -157,25 +171,25 @@ export async function dailyRoutine(api, { redeem = [], donate = [], equipmentDon
 
 export async function redeemItem(api, itemKey, amount = 1) {
   if (!itemKey) throw new Error("redeemItem 需要 itemKey");
-  return unwrap(await api.request("/api/guild/redeem", { method: "POST", body: { itemKey, amount } }));
+  return api.post("/api/guild/redeem", { itemKey, amount });
 }
 
 export async function donateItem(api, itemId, amount = 1) {
   if (!itemId) throw new Error("donateItem 需要 itemId");
-  return unwrap(await api.request("/api/guild/donate", { method: "POST", body: { itemId, amount } }));
+  return api.post("/api/guild/donate", { itemId, amount });
 }
 
 export async function donateEquipment(api, equipmentId) {
   if (!equipmentId) throw new Error("donateEquipment 需要 equipmentId");
-  return unwrap(await api.request("/api/guild/equipment/donate", { method: "POST", body: { equipmentId } }));
+  return api.post("/api/guild/equipment/donate", { equipmentId });
 }
 
 export async function claimDividendReward(api) {
-  return unwrap(await api.request("/api/guild/claim-dividend", { method: "POST", body: {} }));
+  return api.post("/api/guild/claim-dividend", {});
 }
 
 // point 是奖励档位序号,不是数量
 export async function claimProgress(api, point) {
   if (!Number.isInteger(point)) throw new Error("claimProgress 的 point 必须是整数档位");
-  return unwrap(await api.request("/api/guild/claim-progress", { method: "POST", body: { point } }));
+  return api.post("/api/guild/claim-progress", { point });
 }

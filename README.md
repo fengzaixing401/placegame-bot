@@ -159,6 +159,26 @@ agent 用 `authorization: Bearer <令牌>`，浏览器用 WebUI 登录后的会�
 `404` 账号或端点不存在 · `409` 账号已停用 · `413` 请求体过大 · `502` 游戏服务端出错 ·
 `503` 客户端版本过低（游戏强制更新，需升 `version.mjs` 取到的版本）
 
+### 写操作的幂等键
+
+官方 CLI 0.2.63 起，对一批「重发会真扣东西」的写操作会自动带上 `idempotency-key` 请求头，
+服务端据此把重复提交折叠成一次。本程序照抄了这份名单（`src/api-client.mjs` 的
+`IDEMPOTENT_MUTATION_PATHS`），命中时自动生成 UUID：
+
+```
+/api/battle/idle-collect   /api/daily/claim       /api/quests/claim
+/api/achievements/claim    /api/guild/donate      /api/client/collect
+/api/equipment/wear        /api/equipment/enhance
+```
+
+三个关键性质，都有测试守着：
+
+- **一次调用只生成一个键，重试复用同一个。** 若每次重发都换新键，服务端会把它们当成两笔写操作。
+- **两次独立调用各用各的键。** 否则第二次领取会被服务端当成第一次的重复而丢掉。
+- **名单外的写操作不带。** 这份名单跟着 CLI 走，不自行扩大范围。
+
+需要重放同一笔写操作时（比如人工补偿），可以显式传 `idempotencyKey` 覆盖自动生成的值。
+
 ## 排程规则
 
 默认间隔按游戏机制定，时区固定 `Asia/Shanghai`（与容器 TZ 无关）：
@@ -263,7 +283,7 @@ WebUI 的各处保存按钮都是这么做的。
 现已由客户端那张表坐实，不再是推断。
 
 **官方 CLI 自带的 `QUALITY_LABELS` 已整档错位，不要拿它做参照**：它只有 6 个键（没有 `gold`），
-把 `blue` 标成「稀有」——服务端后来插入 `gold` 档，中文名整体下移一位。直到 0.2.51 仍是错的，
+把 `blue` 标成「稀有」——服务端后来插入 `gold` 档，中文名整体下移一位。直到 0.2.63 仍未修正，
 别因为它升了版就改回去。映射的唯一来源是 `src/labels.mjs`，经 `/labels.js` 路由同时供页面使用，
 前后端不会各写一份。
 

@@ -8,6 +8,9 @@ import * as activity from "./features/activity.mjs";
 
 // 动作表:键名同时用于排程任务与 REST 端点,两边行为一致。
 // 每个动作签名 (client, accountRow, args) —— 账号级 rules 覆盖全局默认。
+//
+// 本模块只做两件事:把 args 与账号 rules 合成一次调用参数、把结果原样回传。
+// 具体玩法(怎么筛、什么闸门、发什么字段)都在 features/* 里,别往这里堆业务判断。
 export function buildActions(config) {
   const rules = (row) => rulesFor(config, row?.rules_json ? JSON.parse(row.rules_json) : null);
 
@@ -109,138 +112,48 @@ export function buildActions(config) {
     },
 
     // 只读:给 WebUI 表单喂真实可选项,避免让用户手写 key。
-    // 单项失败不影响其余,表单能渲染多少算多少。
+    // 每个面板各自兜错(见各 feature 的 viewForOptions),单项失败不影响其余,
+    // 表单能渲染多少算多少 —— 所以这里不 try/catch 整块。
+    // 返回结构就是前端契约,显式逐字段列出,不用展开运算符 —— 免得面板内部的
+    // error 之类的辅助字段悄悄漏进响应。
     async options(api) {
-      const [snapshot, bag, equipment, profView, guildView, activityView, idleView] = await Promise.all([
-        boss.bossSnapshot(api).catch((err) => ({ error: err.message, bosses: [] })),
-        guild.donatableItems(api).catch((err) => ({ error: err.message })),
-        // 品质与属性名都取自真实背包,不写死枚举 —— 见 inventory.equipmentSummary
-        inventory.equipmentSummary(api).catch((err) => ({ error: err.message })),
-        profession.view(api).catch((err) => ({ error: err.message })),
-        // 兑换清单来自公会仓库,页面据此渲染下拉,不让用户手写商店 key
-        guild.redeemableItems(api).catch((err) => ({ error: err.message })),
-        // 活跃宝箱进度:阈值是客户端常量,进度靠 bootstrap.daily 现算
-        activity.activityStatus(api).catch((err) => ({ error: err.message })),
-        // 挂机概览:面板上要先让人看见「攒了多久、多少收益」再决定收不收
-        collectFeature.idleSummary(api).catch((err) => ({ error: err.message }))
+      const [bossPanel, guildPanel, equipmentPanel, professionPanel, activityPanel, idlePanel] = await Promise.all([
+        boss.viewForOptions(api),
+        guild.viewForOptions(api),
+        inventory.viewForOptions(api),
+        profession.viewForOptions(api),
+        activity.viewForOptions(api),
+        collectFeature.viewForOptions(api)
       ]);
-      const bosses = snapshot.bosses ?? [];
-      // 每个首领只送页面用得上的字段。整行直接透传会把 21 份战斗预测和参与者榜单
-      // 一起塞进响应,页面一个也用不到。
-      const bossView = (b) => {
-        const view = {
-          bossKey: b.key ?? b.bossKey ?? null,
-          name: b.name ?? null,
-          type: b.type ?? null,
-          mapName: b.mapName ?? null,
-          requiredLevel: typeof b.requiredLevel === "number" ? b.requiredLevel : null,
-          // 服务端自报的刷新规则与当前可挑战次数。三类首领的限制根本不同 ——
-          // 地图「每 2 小时刷新」(attempts 恒为 1,不受每日次数限制)、
-          // 个人「共享每日 5 次免费,门票最多追加 5 次」、世界则是三个固定场次时段。
-          // 面板照抄服务端原话,不本地推断,免得把三套限制讲成一套。
-          refreshText: b.refreshText ?? null,
-          attempts: typeof b.attempts === "number" ? b.attempts : null,
-          // 各难度自带胜率与消耗,与游戏内难度选择界面同源
-          difficulties: (b.difficultyOptions ?? []).map((o) => ({
-            key: o.key,
-            name: o.name ?? o.key,
-            chance: typeof o.chance === "number" ? o.chance : null,
-            predictedWin: typeof o.predictedWin === "boolean" ? o.predictedWin : null,
-            ticketCost: typeof o.ticketCost === "number" ? o.ticketCost : null,
-            goldCost: typeof o.goldCost === "number" ? o.goldCost : null,
-            materialName: o.materialName ?? null,
-            materialCost: typeof o.materialCost === "number" ? o.materialCost : null,
-            ownedMaterial: typeof o.ownedMaterial === "number" ? o.ownedMaterial : null,
-            rewardPreview: Array.isArray(o.rewardPreview) ? o.rewardPreview : [],
-            blockedReason: (o.blockedReason ?? "").trim() || null
-          })),
-          blockedReason: boss.blockedReason(b)
-        };
-        if (b.type === "personal") view.attemptPool = boss.attemptPool(b);
-        // 世界首领只协作:送协作闸门与本场次进度,不送难度相关的胜率判断
-        if (b.type === "world") {
-          view.assistBlockedReason = boss.assistBlockedReason(b);
-          const inst = b.worldInstance;
-          view.instance = inst
-            ? {
-                status: inst.status ?? null,
-                hpPercent: typeof inst.hpPercent === "number" ? inst.hpPercent : null,
-                participantCount: typeof inst.participantCount === "number" ? inst.participantCount : null,
-                myAttemptCount: typeof inst.myAttemptCount === "number" ? inst.myAttemptCount : null,
-                maxAttemptCount: typeof inst.maxAttemptCount === "number" ? inst.maxAttemptCount : null,
-                remainingAttemptCount:
-                  typeof inst.remainingAttemptCount === "number" ? inst.remainingAttemptCount : null,
-                rewardStatus: inst.rewardStatus ?? null
-              }
-            : null;
-        }
-        return view;
-      };
-
-      // 按类型分组:页面上三类首领是三个面板,数量也不同(实测个人 9 / 地图 5 / 世界 7)。
-      // 不硬编码数量 —— 等级与场次都会影响服务端返回哪些。
-      const byType = { personal: [], map: [], world: [] };
-      for (const b of bosses) {
-        const list = byType[b.type];
-        if (list) list.push(bossView(b));
-      }
 
       return {
-        bosses: bosses.map(bossView),
-        bossesByType: byType,
-        // 查不到就只有 "normal" 可信 —— 不猜难度枚举
-        difficulties: boss.difficultyOptions(bosses),
-        // 技能/战术/词缀/目标部位,服务端自带中文名
-        challengeOptions: boss.challengeOptions(bosses),
-        freeAttemptsLeft: boss.freeAttemptsLeft(bosses),
-        donatableItems: Array.isArray(bag) ? bag : [],
-        // 兑换用公会仓库清单;捐献用背包清单 —— 两套不同的东西,接口收的字段也不同
-        redeemableItems: Array.isArray(guildView?.items) ? guildView.items : [],
-        guild: {
-          equipmentDonationMinQuality: guildView?.equipmentDonationMinQuality ?? null,
-          canDonate: guildView?.canDonate !== false,
-          donationBlockedReason: guildView?.donationBlockedReason ?? null
-        },
-        // 副职:优先用游戏返回的中文名(采药/垂钓/烹饪/炼金),读不到才回落到本地键名。
-        // 本地 PROFESSIONS 只是校验白名单,直接拿它当下拉项会让页面显示英文键。
-        professions: Array.isArray(profView?.professions) && profView.professions.length
-          ? profView.professions
-              .map((p) => ({
-                key: p.key ?? null,
-                name: p.name ?? p.key ?? null,
-                level: typeof p.level === "number" ? p.level : null
-              }))
-              .filter((p) => p.key)
-          : profession.PROFESSIONS.map((key) => ({ key, name: key, level: null })),
-        selectedProfession: profView?.selectedProfessionKey ?? null,
-        // 副职动作:18 个动作横跨 4 个副职,必须带 professionKey 才能在页面上分组 ——
-        // 混成一个下拉会让人选到别的副职的动作,要等运行时才失败。
-        professionActions: Array.isArray(profView?.actions)
-          ? profView.actions
-              .map((a) => ({
-                key: a.key ?? a.actionKey ?? null,
-                name: a.name ?? null,
-                professionKey: a.professionKey ?? null,
-                requiredLevel: typeof a.requiredLevel === "number" ? a.requiredLevel : null,
-                unlocked: a.unlocked !== false,
-                blockedReason: (a.blockedReason ?? "").trim() || null
-              }))
-              .filter((a) => a.key)
-          : [],
+        // 首领:平铺一份给"全部"视图,再按类型分三份给三个面板
+        bosses: bossPanel.bosses,
+        bossesByType: bossPanel.bossesByType,
+        difficulties: bossPanel.difficulties,
+        challengeOptions: bossPanel.challengeOptions,
+        freeAttemptsLeft: bossPanel.freeAttemptsLeft,
+        // 公会:兑换用仓库清单、捐献用背包清单 —— 两套不同的东西,接口收的字段也不同
+        donatableItems: guildPanel.donatableItems,
+        redeemableItems: guildPanel.redeemableItems,
+        guild: guildPanel.guild,
+        // 副职
+        professions: professionPanel.professions,
+        selectedProfession: professionPanel.selectedProfession,
+        professionActions: professionPanel.professionActions,
         // 分解条件表单用:品质取值+件数、属性键全集、可分解件数
-        equipment: equipment?.error ? { total: 0, disposable: 0, qualities: [], attrKeys: [], rareRanks: [] } : equipment,
+        equipment: equipmentPanel.summary,
         // 活跃宝箱:活跃点、七项任务进度、五档各自可领与否。面板据此显示「哪档能领、哪档还差多少」
-        activity: activityView?.error ? null : activityView,
+        activity: activityPanel.status,
         // 挂机概览:面板显示已攒时长与预计收益,收之前先让人看见
-        idle: idleView?.error ? null : idleView,
+        idle: idlePanel.idle,
         errors: [
-          snapshot.error,
-          bag?.error,
-          equipment?.error,
-          profView?.error,
-          guildView?.error,
-          activityView?.error,
-          idleView?.error
+          bossPanel.error,
+          equipmentPanel.error,
+          professionPanel.error,
+          ...guildPanel.errors,
+          activityPanel.error,
+          idlePanel.error
         ].filter(Boolean)
       };
     },

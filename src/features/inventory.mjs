@@ -1,8 +1,12 @@
-import { unwrap, pickList, pickKey } from "../util.mjs";
+import { pickList, pickKey, num, text } from "../util.mjs";
 
 // 装备状态枚举。取值来自真号 /api/equipment/list 实测,不是 CLI 的标签表 ——
 // CLI 那份写的是 listed/in_warehouse,真实服务端给的是 on_market,且没有仓库态。
 export const STATUS = { IN_BAG: "in_bag", EQUIPPED: "equipped", ON_MARKET: "on_market" };
+
+// 分解条件表单在拿不到背包时的占位摘要。页面照它渲染出"一个复选框都没有",
+// 比渲染出 undefined 让前端自己兜底更可控。
+export const EMPTY_SUMMARY = { total: 0, disposable: 0, qualities: [], attrKeys: [], rareRanks: [] };
 
 // 可分解 = 在背包中且未上锁。已穿戴/已上架的靠 status 白名单排除 ——
 // 服务端不返回 equipped 字段,穿戴状态只体现在 status 上。
@@ -37,21 +41,15 @@ export function matchesDecomposeRules(row, cond = {}) {
   }
 
   if (typeof cond.maxScore === "number") {
-    if (typeof row.score !== "number" || !Number.isFinite(row.score)) {
-      return { ok: false, reason: "读不到评分,未按评分条件处理" };
-    }
-    if (row.score >= cond.maxScore) {
-      return { ok: false, reason: `评分 ${row.score} 不低于 ${cond.maxScore}` };
-    }
+    const score = num(row.score);
+    if (score === null) return { ok: false, reason: "读不到评分,未按评分条件处理" };
+    if (score >= cond.maxScore) return { ok: false, reason: `评分 ${score} 不低于 ${cond.maxScore}` };
   }
 
   if (typeof cond.maxLevel === "number") {
-    if (typeof row.level !== "number" || !Number.isFinite(row.level)) {
-      return { ok: false, reason: "读不到等级,未按等级条件处理" };
-    }
-    if (row.level > cond.maxLevel) {
-      return { ok: false, reason: `等级 ${row.level} 高于 ${cond.maxLevel}` };
-    }
+    const level = num(row.level);
+    if (level === null) return { ok: false, reason: "读不到等级,未按等级条件处理" };
+    if (level > cond.maxLevel) return { ok: false, reason: `等级 ${level} 高于 ${cond.maxLevel}` };
   }
 
   const keep = [].concat(cond.keepAttrs ?? []);
@@ -86,12 +84,12 @@ function digest(row, reason) {
 }
 
 export async function listEquipment(api) {
-  const data = unwrap(await api.request("/api/equipment/list"));
+  const data = await api.get("/api/equipment/list");
   return pickList(data, "equipment");
 }
 
 export async function listInventory(api) {
-  const data = unwrap(await api.request("/api/inventory/list"));
+  const data = await api.get("/api/inventory/list");
   return { equipment: pickList(data?.equipment, "equipment"), items: pickList(data?.items, "items") };
 }
 
@@ -101,7 +99,8 @@ export async function listInventory(api) {
 export async function decompose(api, { mode = "auto", equipmentIds, conditions = {}, dryRun = false } = {}) {
   // 调用方点名了具体装备:直接拆这些,不再套条件
   if (Array.isArray(equipmentIds) && equipmentIds.length > 0) {
-    return { mode: "explicit", scanned: equipmentIds.length, matched: equipmentIds.length, ...(await runDecompose(api, equipmentIds, dryRun)) };
+    const run = await runDecompose(api, equipmentIds, dryRun);
+    return { mode: "explicit", scanned: equipmentIds.length, matched: equipmentIds.length, ...run };
   }
 
   if (mode === "auto") {
@@ -110,7 +109,7 @@ export async function decompose(api, { mode = "auto", equipmentIds, conditions =
     if (dryRun) {
       throw new Error("auto 模式没有预览端点(游戏侧只提供直接执行)。要预览请切到 explicit 模式,或改用 auto 模式的「确定执行」。");
     }
-    return { mode: "auto", result: unwrap(await api.request("/api/equipment/auto-decompose", { method: "POST", body: {} })) };
+    return { mode: "auto", result: await api.post("/api/equipment/auto-decompose", {}) };
   }
 
   if (!hasNarrowingCondition(conditions)) {
@@ -144,11 +143,7 @@ export async function decompose(api, { mode = "auto", equipmentIds, conditions =
 
 async function runDecompose(api, equipmentIds, dryRun) {
   const path = dryRun ? "/api/equipment/decompose-preview" : "/api/equipment/decompose";
-  return {
-    dryRun,
-    equipmentIds,
-    result: unwrap(await api.request(path, { method: "POST", body: { equipmentIds } }))
-  };
+  return { dryRun, equipmentIds, result: await api.post(path, { equipmentIds }) };
 }
 
 // 背包装备摘要,供 WebUI 渲染分解条件表单。
@@ -178,19 +173,33 @@ export async function equipmentSummary(api) {
   };
 }
 
+// WebUI 分解面板的数据。拿不到背包时退回空摘要 —— 面板能渲染多少算多少,
+// 不因为一个端点失败就把整页顶掉。错误单独回传,不混进摘要本身。
+export async function viewForOptions(api) {
+  try {
+    return { summary: await equipmentSummary(api), error: null };
+  } catch (err) {
+    return { summary: EMPTY_SUMMARY, error: err.message };
+  }
+}
+
 // 服务端自动分解规则。patch 结构 CLI 未展开(原样透传用户 JSON),故此处也不做校验。
 export async function setAutoDecomposeRules(api, patch) {
   if (!patch || typeof patch !== "object") throw new Error("setAutoDecomposeRules 需要 patch 对象");
-  return unwrap(await api.request("/api/equipment/auto-decompose-rules", { method: "POST", body: { patch } }));
+  return api.post("/api/equipment/auto-decompose-rules", { patch });
 }
 
 // 注意这是"切换"语义,不接受目标状态布尔值
 export async function toggleLock(api, equipmentId) {
   if (!equipmentId) throw new Error("toggleLock 需要 equipmentId");
-  return unwrap(await api.request("/api/equipment/toggle-lock", { method: "POST", body: { equipmentId } }));
+  return api.post("/api/equipment/toggle-lock", { equipmentId });
 }
 
 export async function recycleItem(api, itemId, amount = 1) {
   if (!itemId) throw new Error("recycleItem 需要 itemId");
-  return unwrap(await api.request("/api/inventory/recycle", { method: "POST", body: { itemId, amount } }));
+  return api.post("/api/inventory/recycle", { itemId, amount });
 }
+
+// 供 guild 复用的物品行字段。服务端同义字段多,集中在这里挑。
+export const ITEM_KEY_FIELDS = ["itemKey", "key", "templateKey", "itemTemplateKey"];
+export const ITEM_ID_FIELDS = ["itemId", "id", "instanceId"];

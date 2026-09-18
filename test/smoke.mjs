@@ -159,6 +159,52 @@ function fakeFetch(url, opts = {}) {
       return reply({ selected: body.professionKey });
     case "/api/guild/redeem":
       return reply({ redeemed: body.itemKey, amount: body.amount });
+    case "/api/guild/view":
+      return reply({
+        guild: {
+          storage: [
+            { itemKey: "k1", name: "技能残页", quality: "blue", amount: 2 },
+            { itemKey: "k2", name: "洗练石", quality: "purple", amount: 1 }
+          ],
+          equipmentDonationMinQuality: "blue",
+          canDonate: true,
+          donationBlockedReason: ""
+        }
+      });
+    case "/api/inventory/list":
+      return reply({
+        equipment: [],
+        items: [
+          { itemKey: "k1", itemId: "i1", name: "技能残页", amount: 2 },
+          { itemKey: "k3", itemId: "i3", name: "解毒草", amount: 9 }
+        ]
+      });
+    case "/api/professions/view":
+      return reply({
+        professions: [
+          { key: "fishing", name: "垂钓", level: 3 },
+          { key: "herbalism", name: "采药", level: 1 }
+        ],
+        selectedProfessionKey: "fishing",
+        actions: [
+          { key: "fish_1", name: "垂钓", professionKey: "fishing", requiredLevel: 1, unlocked: true, blockedReason: "" },
+          { key: "gather_1", name: "采药", professionKey: "herbalism", requiredLevel: 5, unlocked: false, blockedReason: "等级不足" }
+        ]
+      });
+    case "/api/client/bootstrap":
+      return reply({
+        daily: {
+          key: "daily_1",
+          collectCount: 1,
+          bossCount: 0,
+          enhanceCount: 0,
+          decomposeCount: 0,
+          marketListCount: 0,
+          marketBuyCount: 0,
+          killCount: 0,
+          claimedActivity: []
+        }
+      });
     case "/api/guild/donate":
       return reply({ donated: body.itemId, amount: body.amount });
     case "/api/guild/claim-dividend":
@@ -762,6 +808,73 @@ check(
 check("读不到池子时预算为 1", budget([{}], {}, false) === 1);
 check("没设次数时按池子容量吃满", budget(poolRow(), {}, false) === 5);
 
+console.log("\n[3b] WebUI 只读视图");
+// options 的返回结构就是前端契约(src/web/app.js 按这些键渲染),所以键集必须钉死:
+// 少一个键前端少一块面板,多一个键说明内部辅助字段(如各面板的 error)漏了出来。
+const optionsOut = await service.run("fzx401", (api) => actions.options(api));
+const OPTIONS_KEYS = [
+  "activity",
+  "bosses",
+  "bossesByType",
+  "challengeOptions",
+  "difficulties",
+  "donatableItems",
+  "equipment",
+  "errors",
+  "freeAttemptsLeft",
+  "guild",
+  "idle",
+  "professionActions",
+  "professions",
+  "redeemableItems",
+  "selectedProfession"
+];
+check(
+  "options 键集与前端契约一致",
+  JSON.stringify(Object.keys(optionsOut).sort()) === JSON.stringify(OPTIONS_KEYS),
+  JSON.stringify(Object.keys(optionsOut).sort())
+);
+check("面板全通时 errors 为空", optionsOut.errors.length === 0, JSON.stringify(optionsOut.errors));
+check(
+  "首领按类型分三组",
+  optionsOut.bossesByType.map.length === 5 &&
+    optionsOut.bossesByType.personal.length === 1 &&
+    optionsOut.bossesByType.world.length === 1,
+  JSON.stringify(Object.fromEntries(Object.entries(optionsOut.bossesByType).map(([k, v]) => [k, v.length])))
+);
+check(
+  "副职用服务端中文名,不回落英文键",
+  optionsOut.professions.some((p) => p.key === "fishing" && p.name === "垂钓"),
+  JSON.stringify(optionsOut.professions)
+);
+check(
+  "副职动作带 professionKey 供页面分组",
+  optionsOut.professionActions.every((a) => a.professionKey) && optionsOut.professionActions.length === 2,
+  JSON.stringify(optionsOut.professionActions)
+);
+check(
+  "捐献清单来自背包、兑换清单来自公会仓库",
+  optionsOut.donatableItems.some((r) => r.itemId === "i1") && optionsOut.redeemableItems.some((r) => r.itemKey === "k2"),
+  JSON.stringify({ donate: optionsOut.donatableItems, redeem: optionsOut.redeemableItems })
+);
+check("公会品质下限照抄服务端", optionsOut.guild.equipmentDonationMinQuality === "blue", JSON.stringify(optionsOut.guild));
+check("活跃宝箱有可领档位", optionsOut.activity?.claimable?.length === 1, JSON.stringify(optionsOut.activity));
+check("挂机概览透传 idlePreview", optionsOut.idle?.validSeconds === 39600, JSON.stringify(optionsOut.idle));
+
+// 快照端点挂了也不能把整页顶掉:首领面板退回空集合,其余面板照常
+viewFailures = 3;
+const optionsDegraded = await service.run("fzx401", (api) => actions.options(api));
+check(
+  "首领快照失败时退空集合,其余面板不受影响",
+  optionsDegraded.bosses.length === 0 &&
+    optionsDegraded.bossesByType.map.length === 0 &&
+    optionsDegraded.freeAttemptsLeft === null &&
+    optionsDegraded.errors.some((e) => /请求超时|超时/.test(e)) &&
+    optionsDegraded.professions.length === 2,
+  JSON.stringify({ errors: optionsDegraded.errors, professions: optionsDegraded.professions.length })
+);
+check("降级后键集不变", JSON.stringify(Object.keys(optionsDegraded).sort()) === JSON.stringify(OPTIONS_KEYS));
+
 console.log("\n[4] 必带请求头");
 const c = calls.find((x) => x.path === "/api/battle/idle-collect");
 check("client-version", c.headers["x-placegame-client-version"] === "0.2.50");
@@ -812,7 +925,7 @@ function scriptedClient(script) {
     timeoutMs: 30000,
     fetchImpl: (url, opts = {}) => {
       const path = new URL(url).pathname;
-      seen.push({ path, method: opts.method ?? "GET" });
+      seen.push({ path, method: opts.method ?? "GET", headers: opts.headers ?? {} });
       const step = script[seen.length - 1] ?? "ok";
       if (step === "timeout") {
         const err = new Error("aborted");
@@ -920,7 +1033,60 @@ check(
 
 globalThis.setTimeout = realSetTimeout;
 
+console.log("\n[6b] 幂等键");
+// CLI 0.2.63 起对一批写操作自动带 idempotency-key,服务端据此把重复提交折叠成一次。
+// 本程序会重登重发、也会被排程重跑 —— 少了这个头,一次抖动就可能重复领取。
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+// 跑一次真实调用,取回它实际发出的请求头
+const headersOf = async (fn) => {
+  const { client, seen } = scriptedClient(["ok"]);
+  await fn(client);
+  return seen[0]?.headers ?? {};
+};
+
+const listedHeaders = await headersOf((client) => client.post("/api/battle/idle-collect", {}));
+check(
+  "幂等名单内的写操作带上 idempotency-key",
+  UUID_RE.test(listedHeaders["idempotency-key"] ?? ""),
+  String(listedHeaders["idempotency-key"])
+);
+
+// 名单外的写操作不带 —— 不能自己扩大范围,服务端只认 CLI 那份名单
+const unlistedHeaders = await headersOf((client) => client.post("/api/equipment/decompose", { equipmentIds: ["e1"] }));
+check("名单外的写操作不带幂等键", unlistedHeaders["idempotency-key"] === undefined, JSON.stringify(unlistedHeaders));
+
+// GET 一律不带
+const getHeaders = await headersOf((client) => client.get("/api/client/dynamic-view"));
+check("读操作不带幂等键", getHeaders["idempotency-key"] === undefined);
+
+// 关键性质:重试复用同一个键。若每次重发都换新键,服务端会把它们当成两笔写操作。
+sleeps = [];
+const idemRetry = scriptedClient(["timeout", "ok"]);
+await idemRetry.client.post("/api/battle/idle-collect", {}, { retries: 2 }).catch(() => {});
+const retryKeys = idemRetry.seen.map((s) => s.headers["idempotency-key"]);
+check(
+  "重试复用同一个幂等键",
+  idemRetry.seen.length === 2 && !!retryKeys[0] && retryKeys[0] === retryKeys[1],
+  JSON.stringify(retryKeys)
+);
+
+// 两次独立调用之间必须换新键,否则第二次领取会被服务端当成第一次的重复而丢弃
+const twoCalls = scriptedClient(["ok", "ok"]);
+await twoCalls.client.post("/api/quests/claim", { questKey: "q1" });
+await twoCalls.client.post("/api/quests/claim", { questKey: "q2" });
+check(
+  "两次独立调用各用各的键",
+  twoCalls.seen[0].headers["idempotency-key"] !== twoCalls.seen[1].headers["idempotency-key"],
+  JSON.stringify(twoCalls.seen.map((s) => s.headers["idempotency-key"]))
+);
+
+// 调用方可以显式指定(重放同一笔写操作时要用同一个键)
+const explicitHeaders = await headersOf((client) => client.post("/api/guild/donate", { itemId: "i1" }, { idempotencyKey: "fixed-key" }));
+check("显式幂等键优先", explicitHeaders["idempotency-key"] === "fixed-key", JSON.stringify(explicitHeaders));
+
 console.log("\n[7] REST 接口");
+
 const settings = new SettingsStore(db, new SecretBox(config.masterKeyB64), {
   envApiToken: config.apiToken,
   sessionHours: config.webSessionHours
