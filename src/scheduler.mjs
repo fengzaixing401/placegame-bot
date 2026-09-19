@@ -1,8 +1,44 @@
 import { nowIso } from "./db.mjs";
 import { rulesFor } from "./config.mjs";
 import { compactForStore } from "./util.mjs";
+import { isBenignError } from "./labels.mjs";
 
 const TICK_MS = 60 * 1000;
+
+// 动作把每步失败收进 result.errors 而不抛出(features/*.mjs 的约定),这样一个面板挂了
+// 不影响其他面板。副作用是"一步都没成功"的任务也会正常返回,于是被记成 ok ——
+// 实测踩到过:版本闸门把所有游戏接口打回 426 时,boss.map / boss.world / profession
+// 三条任务在面板上全是绿的,实际一步都没成。真正的故障被绿色盖住了。
+//
+// 这里只认"非良性"的失败:游戏把每日上限也当错误返回(「今日已领取」「次数已用尽」),
+// 那些不该让任务显示成有问题 —— 词表与日志渲染器共用一份(labels.mjs)。
+// daily-run 的结果是嵌套的(每个子任务各带一份 errors),所以递归收集。
+export function collectRealFailures(result, out = [], depth = 0) {
+  if (!result || typeof result !== "object" || depth > 4) return out;
+  if (Array.isArray(result)) {
+    for (const item of result) collectRealFailures(item, out, depth + 1);
+    return out;
+  }
+  if (Array.isArray(result.errors)) {
+    for (const e of result.errors) {
+      const msg = typeof e === "string" ? e : e?.error ?? e?.message;
+      if (msg && !isBenignError(String(msg))) out.push(String(msg));
+    }
+  }
+  for (const [key, value] of Object.entries(result)) {
+    if (key === "errors") continue;
+    if (value && typeof value === "object") collectRealFailures(value, out, depth + 1);
+  }
+  return out;
+}
+
+// 失败摘要写进 job_runs.error 列,长度上限与异常分支保持一致(500)。
+function summarizeFailures(messages) {
+  const uniq = [...new Set(messages)];
+  const head = uniq.slice(0, 3).join(";");
+  const more = uniq.length > 3 ? ` …等共 ${uniq.length} 项` : "";
+  return `${uniq.length} 项失败:${head}${more}`.slice(0, 500);
+}
 
 // 滚动排程在间隔之上额外加的余量。地图首领的刷新是"每个首领各自从上次挑战起算 2 小时"
 // (服务端自报 refreshText「地图首领每 2 小时刷新」),而一轮里几个首领是依次打的、
@@ -200,6 +236,17 @@ export class Scheduler {
 
     try {
       const result = await this.service.run(account.id, (client) => action(client, account));
+      // 动作正常返回不等于成功:失败被收在 result.errors 里(见 collectRealFailures)。
+      // 有真失败就不记 ok —— 记 partial 并把摘要写进 error 列,免得绿色盖住故障。
+      const failures = collectRealFailures(result);
+      if (failures.length > 0) {
+        const summary = summarizeFailures(failures);
+        this.db
+          .prepare(`UPDATE job_runs SET status='partial', finished_at=?, result_json=?, error=? WHERE id=?`)
+          .run(nowIso(), this.#storableResult(result), summary, runId);
+        this.logger.error(`[scheduler] ${account.label}/${job.key} 有失败:${summary}`);
+        return { status: "partial", result };
+      }
       this.db
         .prepare(`UPDATE job_runs SET status='ok', finished_at=?, result_json=? WHERE id=?`)
         .run(nowIso(), this.#storableResult(result), runId);

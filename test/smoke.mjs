@@ -980,6 +980,79 @@ service.setEnabled("fzx401", true);
 store.setSecret(store.getByLabel("fzx401").id, "password", "secret");
 check("恢复后失败计数清零", store.getByLabel("fzx401").auth_failure_count === 0);
 
+console.log("\n[5b] 失败不再被绿色盖住(任务状态 partial)");
+// 动作把每步失败收进 result.errors 而不抛异常(features/*.mjs 的约定),这样一个面板挂了
+// 不影响其他面板。副作用是"一步都没成功"的任务也会正常返回,以前被记成 ok ——
+// 实测踩到过:版本闸门把所有游戏接口打回 426 时,boss.map / boss.world / profession
+// 在任务面板上全是绿的,实际一步都没成。真正的故障被绿色盖住了。
+const { collectRealFailures } = await import("../src/scheduler.mjs");
+const { isBenignError } = await import("../src/labels.mjs");
+
+check("良性提示认作良性", isBenignError("今日已领取。") === true && isBenignError("本场世界首领最多参与 3 次。") === true);
+check("真故障不认作良性", isBenignError("当前客户端版本过低，必须更新到 0.2.64 后才能继续游戏。") === false);
+
+const VERSION_ERR = "当前客户端版本过低，必须更新到 0.2.64 后才能继续游戏。";
+const mixed = collectRealFailures({
+  errors: [{ step: "listBosses", error: VERSION_ERR }, { step: "signIn", error: "今日已领取。" }]
+});
+check("只收非良性失败", mixed.length === 1 && /版本过低/.test(mixed[0]), JSON.stringify(mixed));
+check(
+  "嵌套结果也收(daily-run 形状)",
+  collectRealFailures({ ran: { collect: { errors: [{ step: "x", error: "网络断了" }] } } }).length === 1
+);
+check("没有 errors 就是空", collectRealFailures({ items: [], idle: { a: 1 } }).length === 0);
+
+// 真跑一轮 tick:把 boss.map 换成"每步都失败但不抛异常"的动作 —— 这正是 features 的形状。
+// 只开 boss 且不带世界首领窗口,保证这一轮只跑 boss.map 一个任务。
+const PROBE_RULES = {
+  collect: { enabled: false },
+  inventory: { enabled: false },
+  profession: { enabled: false },
+  guild: { enabled: false },
+  activity: { enabled: false },
+  boss: { enabled: true, mapBosses: ["boss_map_1"], challengePersonal: false, worldWindows: [] }
+};
+const probeAccount = (label) =>
+  service.create({ label, gameUsername: label, password: "secret", rules: PROBE_RULES }).id;
+const lastRunOf = (accountId, jobKey) =>
+  db.prepare(`SELECT status, error FROM job_runs WHERE account_id=? AND job_key=? ORDER BY id DESC LIMIT 1`).get(accountId, jobKey);
+
+const realBossMap = actions["boss.map"];
+service.setEnabled("fzx401", false); // 隔离:只让探针账号参与这一轮 tick
+
+// ① 全是真失败 → partial(以前是 ok)
+const accPartial = probeAccount("tick-partial");
+actions["boss.map"] = async () => ({ attempted: [], skipped: [], claimed: null, errors: [{ step: "listBosses", error: VERSION_ERR }] });
+await scheduler.tick();
+actions["boss.map"] = realBossMap;
+const rowPartial = lastRunOf(accPartial, "boss.map");
+check("全失败的任务记 partial 而不是 ok", rowPartial?.status === "partial", JSON.stringify(rowPartial));
+check("失败摘要写进 error 列", /版本过低/.test(rowPartial?.error ?? ""), String(rowPartial?.error));
+
+// ② 只有良性提示(每日上限)→ 仍是 ok,不无谓报警
+const accBenign = probeAccount("tick-benign");
+actions["boss.map"] = async () => ({ attempted: [], errors: [{ step: "claimReward", error: "今日已领取。" }] });
+await scheduler.tick();
+actions["boss.map"] = realBossMap;
+const rowBenign = lastRunOf(accBenign, "boss.map");
+check("只有良性提示的任务仍是 ok", rowBenign?.status === "ok", JSON.stringify(rowBenign));
+
+// ③ 抛异常仍是 error —— 原有行为不变
+const accThrow = probeAccount("tick-throw");
+actions["boss.map"] = async () => {
+  throw new Error("炸了");
+};
+await scheduler.tick();
+actions["boss.map"] = realBossMap;
+const rowThrow = lastRunOf(accThrow, "boss.map");
+check("抛异常仍记 error", rowThrow?.status === "error" && /炸了/.test(rowThrow?.error ?? ""), JSON.stringify(rowThrow));
+
+service.setEnabled("fzx401", true);
+
+// 探针账号用完就删:后面几节断言账号总数为 1,留着会把它们带红
+for (const label of ["tick-partial", "tick-benign", "tick-throw"]) service.remove(label);
+check("探针账号已清理", service.list().length === 1, JSON.stringify(service.list().map((a) => a.label)));
+
 console.log("\n[6] 请求重试与退避");
 // 这一节最要紧的一条是"POST 默认不重试"。decompose 重发会把已经拆掉的装备再拆一批,
 // challenge 重发会重复扣次数与门票 —— 那种错误在真号上不可逆,所以默认值必须有断言守着。

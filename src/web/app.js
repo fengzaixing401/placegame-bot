@@ -1407,7 +1407,10 @@ async function loadTasks() {
     return;
   }
 
-  const STATUS_WORD = { ok: "成功", error: "失败", running: "执行中" };
+  const STATUS_WORD = { ok: "成功", partial: "有失败", error: "失败", running: "执行中" };
+  // 状态 → 样式类。partial 是"跑完了但有步骤失败" —— 动作把失败收在 result.errors 里
+  // 而不抛异常,以前这种情况会被记成 ok,绿色把故障盖住了。
+  const STATUS_CLASS = { ok: "status-ok", partial: "status-warn", error: "status-bad" };
 
   // 结果列:一行中文摘要;点开才展开完整日志,免得列表被撑爆
   const rows = [];
@@ -1424,7 +1427,7 @@ async function loadTasks() {
       el("td", { textContent: labels.get(r.account_id) ?? r.account_id }),
       el("td", { textContent: PGLog.label(r.job_key) }),
       el("td", {
-        className: r.status === "ok" ? "status-ok" : r.status === "error" ? "status-bad" : "",
+        className: STATUS_CLASS[r.status] ?? "",
         textContent: STATUS_WORD[r.status] ?? r.status
       }),
       el("td", { textContent: new Date(r.started_at).toLocaleString("zh-CN") }),

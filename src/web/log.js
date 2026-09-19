@@ -220,7 +220,12 @@
   // 混在失败里会让人以为程序坏了 —— 单独归到提示。
   // 「本场世界首领最多参与 3 次。」是打满了,不是故障 —— 原先没有词能匹配它,
   // 于是每轮打满的首领都被算成失败。「最多」「已参与」一并收进来。
-  var BENIGN = /(已领取|已用尽|已完成|完成捐献后|未开放|尚未开放|已达上限|上限|最多|已参与|不足|冷却)/;
+  // 词表来自 /labels.js(与后端排程共用一份);拿不到时退回 null,
+  // 此时所有错误都按真失败显示 —— 宁可显示得严一点,也别把真故障当提示吞掉。
+  var BENIGN = (window.PGLabels && window.PGLabels.BENIGN_ERROR)
+    ? new RegExp(window.PGLabels.BENIGN_ERROR)
+    : null;
+  var isBenign = function (m) { return !!BENIGN && BENIGN.test(String(m == null ? "" : m)); };
   var errLines = function (errors, out, base) {
     base = base || 0;
     var rows = asArr(errors);
@@ -229,7 +234,7 @@
     for (var i = 0; i < rows.length; i++) {
       var note = cutNote(rows[i]);
       if (note) { out.push(L(note, "muted", base)); continue; }
-      (BENIGN.test(errText(rows[i])) ? benign : real).push(rows[i]);
+      (isBenign(errText(rows[i])) ? benign : real).push(rows[i]);
     }
     if (benign.length) {
       out.push(L("提示(每日上限之类,不算失败):", "muted", base));

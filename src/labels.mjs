@@ -154,6 +154,18 @@ export function sortQualities(list, keyOf = (x) => x) {
   });
 }
 
+// 游戏把一批"每日上限"当成错误返回:「今日已领取」「次数已用尽」「本场最多参与 3 次」。
+// 它们不是故障。日志渲染器据此把它们降成提示,排程据此决定要不要把任务记成 partial ——
+// **两边共用这一份词表**(经 /labels.js 下发),别再抄第二份,否则迟早漂移。
+// 存的是正则源码字符串:正则没法 JSON 序列化,前端自己 new RegExp。
+export const BENIGN_ERROR_SOURCE =
+  "(已领取|已用尽|已完成|完成捐献后|未开放|尚未开放|已达上限|上限|最多|已参与|不足|冷却)";
+export const BENIGN_ERROR = new RegExp(BENIGN_ERROR_SOURCE);
+
+export function isBenignError(message) {
+  return typeof message === "string" && BENIGN_ERROR.test(message);
+}
+
 // 送给前端的整份表。前端只读,故直接序列化;新增表记得加进来。
 export function browserBundle() {
   return {
@@ -169,7 +181,8 @@ export function browserBundle() {
     ACTIVITY_TIERS,
     ACTIVITY_QUESTS,
     ACTIVITY_POINT_CAP,
-    ACTIVITY_POINT_PER_QUEST
+    ACTIVITY_POINT_PER_QUEST,
+    BENIGN_ERROR: BENIGN_ERROR_SOURCE
   };
 }
 
