@@ -21,11 +21,30 @@ export class AuthError extends ApiError {
   }
 }
 
+// 版本闸门。服务端在 426 的 data.minimumClientVersion 里直接给出要求的最低版本
+// (实测 2026-09-19:发 0.2.63 时返回 {"data":{"minimumClientVersion":"0.2.64",...}},
+// HTTP 426)。带上它,调用方才有机会自愈,而不是干等到重启。
 export class UpdateRequiredError extends ApiError {
-  constructor(message) {
+  constructor(message, { requiredVersion } = {}) {
     super(message, { status: 426, code: "UPDATE_REQUIRED" });
     this.name = "UpdateRequiredError";
+    this.requiredVersion = requiredVersion ?? null;
   }
+}
+
+// 只比较点分数字段,不引第三方 semver —— 这个项目的版本号形态是固定的 x.y.z。
+// 返回 true 表示 a 严格高于 b。任一段读不出数字就返回 false(宁可不动版本)。
+function isNewerVersion(a, b) {
+  if (typeof a !== "string" || typeof b !== "string") return false;
+  const pa = a.split(".").map((x) => Number.parseInt(x, 10));
+  const pb = b.split(".").map((x) => Number.parseInt(x, 10));
+  if (pa.some((x) => !Number.isFinite(x)) || pb.some((x) => !Number.isFinite(x))) return false;
+  for (let i = 0; i < Math.max(pa.length, pb.length); i += 1) {
+    const x = pa[i] ?? 0;
+    const y = pb[i] ?? 0;
+    if (x !== y) return x > y;
+  }
+  return false;
 }
 
 const DEFAULT_HEADERS = {
@@ -63,8 +82,10 @@ function isRetryable(err) {
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export class GameApiClient {
-  constructor({ baseUrl, version, deviceId, username, password, fetchImpl = globalThis.fetch, timeoutMs = 15000, onLogin }) {
+  constructor({ baseUrl, version, deviceId, username, password, fetchImpl = globalThis.fetch, timeoutMs = 15000, onLogin, onVersionChange }) {
     this.baseUrl = baseUrl.replace(/\/+$/, "");
+    // version 是可变的:游戏一升版本,服务端就会用 426 把旧版本全挡回去。
+    // 启动时取到的版本可能当天就过期,所以这里允许运行期被 #adoptVersion 改写。
     this.version = version;
     this.deviceId = deviceId;
     this.username = username;
@@ -73,6 +94,7 @@ export class GameApiClient {
     this.timeoutMs = timeoutMs;
     this.sessionToken = null;
     this._onLogin = onLogin;
+    this._onVersionChange = onVersionChange;
     this._loginPromise = null;
   }
 
@@ -143,6 +165,8 @@ export class GameApiClient {
 
     const budget = typeof retries === "number" ? retries : method === "GET" ? RETRY_BACKOFF_MS.length : 0;
     const canRelogin = authed && retry && !!this.username && !!this.password;
+    // 一次 request 内只自愈一次版本,免得服务端来回改要求时打成死循环
+    let versionHealed = false;
 
     for (let attempt = 0; ; attempt += 1) {
       try {
@@ -158,11 +182,29 @@ export class GameApiClient {
             throw err;
           }
         }
-        // ② 瞬时故障 -> 退避重试
+        // ② 版本闸门 -> 采用服务端要求的最低版本后重发一次。
+        // 426 是服务端主动拒绝、请求根本没执行,所以重发对写操作同样安全
+        // (不像超时那样"可能已经生效了")。有了这一步,长跑的容器不必重启
+        // 就能跟上游戏更新 —— 在此之前,游戏一升版本整个服务会静默失效。
+        if (err instanceof UpdateRequiredError && !versionHealed) {
+          versionHealed = true;
+          if (await this.#adoptVersion(err.requiredVersion)) continue;
+          throw err;
+        }
+        // ③ 瞬时故障 -> 退避重试
         if (attempt >= budget || !isRetryable(err)) throw err;
         await sleep(RETRY_BACKOFF_MS[Math.min(attempt, RETRY_BACKOFF_MS.length - 1)]);
       }
     }
+  }
+
+  // 采用服务端要求的最低版本。只有确实更高才动 —— 免得服务端给个更旧的值把版本改回去。
+  async #adoptVersion(required) {
+    if (!isNewerVersion(required, this.version)) return false;
+    const from = this.version;
+    this.version = required;
+    await this._onVersionChange?.(required, from);
+    return true;
   }
 
   async requestRaw(path, { method = "GET", body, responseState = "omit", authed = true, skipAuth = false, timeoutMs, idempotencyKey } = {}) {
@@ -194,7 +236,10 @@ export class GameApiClient {
       throw new AuthError(payload?.error ?? "登录状态无效。", this.normalizeData(payload), payload);
     }
     if (response.status === 426) {
-      throw new UpdateRequiredError(payload?.error ?? "客户端版本过低。");
+      // 服务端在 data.minimumClientVersion 里给出要求的最低版本,带上它调用方才能自愈
+      throw new UpdateRequiredError(payload?.error ?? "客户端版本过低。", {
+        requiredVersion: payload?.data?.minimumClientVersion ?? null
+      });
     }
     if (!response.ok || payload?.ok === false) {
       throw new ApiError(payload?.error ?? `请求失败:HTTP ${response.status}`, {

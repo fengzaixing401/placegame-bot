@@ -45,6 +45,12 @@ let worldAssistBlocked = "";
 // 真号上有一轮 boss.world 整个任务 status=error、result_json 为空,7 个首领一个都没打。
 let viewFailures = 0;
 
+// 装备夹具里那几行"受硬保护"的样本(e5~e8)是否出现。
+// auto 模式加了开跑前预检:背包里存在等级读不到或高于 160 的装备就直接拒绝,
+// 所以走 daily-run 的用例要先把它们摘掉,否则整轮会卡在分解这一步。
+// 默认开着,给硬保护的用例用;daily-run 之前显式置 false。
+let equipmentHardRows = true;
+
 // 协作场次的可变状态。真号实测每场次 maxAttemptCount=3,assist 响应自带 worldBoss 段,
 // 循环协作就是靠它驱动的 —— 假响应少了这段,循环会走"读不到次数就停手",
 // 于是"每个首领只协作一次"的老 bug 在测试里照样全绿。
@@ -138,12 +144,26 @@ function fakeFetch(url, opts = {}) {
       });
 
     case "/api/equipment/list":
+      // 真实装备行带 level/score。e5~e8 专供硬保护用例,品质都用 rare,
+      // 免得混进既有那几条按 common 筛的断言里;由 equipmentHardRows 控制有无。
       return reply({
         equipment: [
-          { id: "e1", status: "in_bag", locked: false, quality: "common" },
-          { id: "e2", status: "in_bag", locked: true, quality: "common" },
-          { id: "e3", status: "equipped", locked: false, quality: "rare" },
-          { id: "e4", status: "in_warehouse", locked: false, quality: "common" }
+          { id: "e1", status: "in_bag", locked: false, quality: "common", level: 40, score: 120 },
+          { id: "e2", status: "in_bag", locked: true, quality: "common", level: 40, score: 130 },
+          { id: "e3", status: "equipped", locked: false, quality: "rare", level: 55, score: 300 },
+          { id: "e4", status: "in_warehouse", locked: false, quality: "common", level: 40, score: 110 },
+          ...(equipmentHardRows
+            ? [
+                // 等级高于硬上限 160 —— 无论条件怎么配都不许拆
+                { id: "e5", status: "in_bag", locked: false, quality: "rare", level: 200, score: 900 },
+                // 正好 160:不高于上限,可拆(边界值,防"误用 >= 判定"把 160 也保护掉)
+                { id: "e6", status: "in_bag", locked: false, quality: "rare", level: 160, score: 800 },
+                // status 说在背包、equipped 布尔说在穿 —— 两个口径不一致,必须按"在穿"处理
+                { id: "e7", status: "in_bag", locked: false, quality: "rare", equipped: true, level: 30, score: 100 },
+                // 等级字段缺失:证明不了不高于 160,按受保护处理
+                { id: "e8", status: "in_bag", locked: false, quality: "rare", score: 100 }
+              ]
+            : [])
         ]
       });
 
@@ -398,6 +418,70 @@ try {
   nullOnlyGuard = err.message;
 }
 check("全 null 条件被拦下", /至少要设一个收紧条件/.test(nullOnlyGuard ?? ""), String(nullOnlyGuard));
+
+// ---- 硬保护:穿戴中 + 等级 > 160。这两条是运维约束,不受任何条件配置影响 ----
+// 用 maxLevel: 999 做收紧条件,意思是"用户把等级上限放到最宽" —— 即便如此,
+// 穿戴中的、高于 160 的、等级读不到的,一个都不许出现在 equipmentIds 里。
+const hardCond = await service.run("fzx401", (api, row) =>
+  actions.inventory(api, row, { mode: "explicit", conditions: { maxLevel: 999 } })
+);
+const hardIds = hardCond.equipmentIds ?? [];
+const hardKept = new Map(hardCond.kept.map((k) => [k.equipmentId, k.reason]));
+check("条件放宽到 999 也拆不动等级>160(e5)", !hardIds.includes("e5"), JSON.stringify(hardIds));
+check("e5 的保留原因是等级", /高于 160/.test(hardKept.get("e5") ?? ""), String(hardKept.get("e5")));
+check("正好 160 可以拆(e6,边界不误伤)", hardIds.includes("e6"), JSON.stringify(hardIds));
+check("status 穿戴中的不拆(e3)", !hardIds.includes("e3"), JSON.stringify(hardIds));
+check("equipped 布尔为真也不拆(e7)", !hardIds.includes("e7"), JSON.stringify(hardIds));
+check("e7 的保留原因是穿戴", /穿戴/.test(hardKept.get("e7") ?? ""), String(hardKept.get("e7")));
+check("等级读不到的不拆(e8)", !hardIds.includes("e8"), JSON.stringify(hardIds));
+check("e8 的保留原因是读不到等级", /读不到等级/.test(hardKept.get("e8") ?? ""), String(hardKept.get("e8")));
+
+// 点名路径:调用方直接给 id、不套 conditions。它能从 REST 直接触达,
+// 绕得过硬保护就是个"把身上装备交出去"的后门。受保护的 id 必须被拒。
+const pointed = await service.run("fzx401", (api, row) =>
+  actions.inventory(api, row, { equipmentIds: ["e1", "e3", "e5", "e7"] })
+);
+check(
+  "点名路径只放行 e1",
+  JSON.stringify(pointed.equipmentIds) === JSON.stringify(["e1"]),
+  JSON.stringify(pointed.equipmentIds)
+);
+check("点名路径拒掉 3 件并逐件给原因", pointed.refusedCount === 3 && pointed.refused.length === 3, JSON.stringify(pointed.refused));
+check(
+  "点名路径没把受保护 id 发给服务端",
+  JSON.stringify(pointed.result?.decomposed) === JSON.stringify(["e1"]),
+  JSON.stringify(pointed.result)
+);
+
+// 全被拒时一个请求都不发:不为"拆 0 件"去打一次写接口
+const allRefused = await service.run("fzx401", (api, row) =>
+  actions.inventory(api, row, { equipmentIds: ["e3", "e5", "e7", "e8"] })
+);
+check(
+  "点名全被拒时不发请求",
+  allRefused.matched === 0 && allRefused.result === null && allRefused.equipmentIds.length === 0,
+  JSON.stringify({ matched: allRefused.matched, result: allRefused.result })
+);
+
+// 查无此 id 也拒绝,不盲发 —— 核对不了就宁可少拆
+const ghost = await service.run("fzx401", (api, row) =>
+  actions.inventory(api, row, { equipmentIds: ["e1", "no_such_id"] })
+);
+check(
+  "查无此 id 一并拒绝",
+  ghost.refusedCount === 1 && /不在装备列表/.test(ghost.refused[0]?.reason ?? ""),
+  JSON.stringify(ghost.refused)
+);
+
+// auto 拆哪些由游戏侧规则决定,本程序看不到那份规则,没法逐件预览。
+// 背包里存在受保护装备时必须拒绝,而不是赌游戏不会拆它。
+let autoGuard = null;
+try {
+  await service.run("fzx401", (api, row) => actions.inventory(api, row, { mode: "auto" }));
+} catch (err) {
+  autoGuard = err.message;
+}
+check("auto 遇到受保护装备时拒绝执行", /无法保证/.test(autoGuard ?? ""), String(autoGuard));
 
 const prof = await service.run("fzx401", (api, row) => actions.profession(api, row));
 check("副职 settle+select+enqueue", prof.settled && prof.selected?.selected === "fishing" && prof.enqueued[0]?.count === 5);
@@ -936,6 +1020,23 @@ function scriptedClient(script) {
       if (step === "badjson") {
         return Promise.resolve({ ok: true, status: 200, text: () => Promise.resolve("<html>502</html>") });
       }
+      // "upgrade:0.2.99" -> 426 版本闸门,响应体带上服务端要求的最低版本。
+      // 真实服务端就是这个形状:{"data":{"minimumClientVersion":"0.2.64",...},"error":"..."}
+      if (typeof step === "string" && step.startsWith("upgrade:")) {
+        const required = step.slice("upgrade:".length);
+        return Promise.resolve({
+          ok: false,
+          status: 426,
+          text: () =>
+            Promise.resolve(
+              JSON.stringify({
+                ok: false,
+                error: `当前客户端版本过低，必须更新到 ${required} 后才能继续游戏。`,
+                data: { minimumClientVersion: required, minimumWebBuildRevision: "20260918.1" }
+              })
+            )
+        });
+      }
       if (typeof step === "number") {
         return Promise.resolve({
           ok: false,
@@ -1029,6 +1130,46 @@ check(
   "一直 401 就抛原错,不循环重登",
   reauthDead.ok === false && reauthDead.code === "AUTH" && reauthDead.calls === 3 && reauthDead.sleeps.length === 0,
   JSON.stringify(reauthDead)
+);
+
+// ---- 版本闸门自愈 ----
+// 实测暴露的失效模式:容器启动时取到 0.2.63,游戏当天把最低版本提到 0.2.64,
+// 之后所有游戏接口都返 426,而进程还活着 —— 不重启就一直坏着,面板全空。
+// 服务端在 426 的 data.minimumClientVersion 里给了要求值,采用它再发一次即可。
+const heal = (() => {
+  const { client, seen } = scriptedClient(["upgrade:0.2.99", "ok"]);
+  return client.request("/api/client/dynamic-view").then(
+    () => ({ ok: true, client, seen }),
+    (err) => ({ ok: false, client, seen, code: err.code })
+  );
+})();
+{
+  const r = await heal;
+  check("426 自愈后重发成功", r.ok === true && r.seen.length === 2, JSON.stringify(r.seen?.map((s) => s.path)));
+  check(
+    "重发时带上了服务端要求的新版本",
+    r.seen[1]?.headers["x-placegame-client-version"] === "0.2.99",
+    JSON.stringify(r.seen.map((s) => s.headers["x-placegame-client-version"]))
+  );
+  check("客户端版本已就地更新", r.client.version === "0.2.99", String(r.client.version));
+}
+
+// 426 没带最低版本(或带的是更旧的值)时不乱改版本 —— 改了只会把版本往下带
+const noHint = await attempt([426, "ok"], "/api/client/dynamic-view");
+check(
+  "426 没给最低版本时不重发",
+  noHint.ok === false && noHint.calls === 1 && noHint.code === "UPDATE_REQUIRED",
+  JSON.stringify(noHint)
+);
+const olderHint = await attempt(["upgrade:0.2.10", "ok"], "/api/client/dynamic-view");
+check("426 给的是更旧版本时不回退", olderHint.ok === false && olderHint.calls === 1, JSON.stringify(olderHint));
+
+// 一次请求内只自愈一次:服务端连着要两个版本也不能打成死循环
+const twice = await attempt(["upgrade:0.2.99", "upgrade:0.3.00", "ok"], "/api/client/dynamic-view");
+check(
+  "同一请求内只自愈一次",
+  twice.ok === false && twice.calls === 2 && twice.code === "UPDATE_REQUIRED",
+  JSON.stringify(twice)
 );
 
 globalThis.setTimeout = realSetTimeout;
@@ -1125,6 +1266,10 @@ check("方法不允许 405", (await call("PUT", "/accounts")).status === 405);
 check("未知端点 404", (await call("GET", "/nope")).status === 404);
 const restCollect = await call("POST", "/accounts/fzx401/collect", { body: {} });
 check("REST 触发收益", restCollect.status === 200 && restCollect.json.data.adventureResolved === true);
+// daily-run 会按默认规则跑一遍分解。默认 mode 是 auto,而 auto 现在会先预检背包 ——
+// 夹具里那几行受保护装备会让整轮卡住,所以这里先把它们摘掉,
+// 让这一条专注验证"整轮串起来能跑通",硬保护本身由上面的用例覆盖。
+equipmentHardRows = false;
 const dr = await call("POST", "/accounts/fzx401/daily-run", { body: {} });
 check("一键日常各步骤", Object.keys(dr.json.data.ran).length === 6, JSON.stringify(Object.keys(dr.json.data.ran)));
 check("一键日常无错", dr.json.data.errors.length === 0, JSON.stringify(dr.json.data.errors));

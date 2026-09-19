@@ -525,6 +525,8 @@ function fStatus(titleText, lines, hint) {
 function panelInventory(r, opts) {
   const c = r.inventory?.conditions ?? {};
   const eq = opts?.equipment ?? {};
+  // 硬上限由后端随背包摘要一起下发,前端不另存一份常量 —— 两边各写一个 160 迟早漂移
+  const hardMaxLevel = Number.isFinite(eq.hardMaxLevel) ? eq.hardMaxLevel : null;
   const mode = fSelect(
     "模式",
     r.inventory?.mode,
@@ -532,7 +534,14 @@ function panelInventory(r, opts) {
     "auto 由游戏决定拆哪些,本程序无从预览;explicit 才看下面的条件"
   );
   const maxScore = fNum("评分低于", c.maxScore, { min: 0, step: 1, hint: "留空 = 不看评分" });
-  const maxLevel = fNum("装备等级不高于", c.maxLevel, { min: 0, max: 999, step: 1, hint: "留空 = 不看等级" });
+  const maxLevel = fNum("装备等级不高于", c.maxLevel, {
+    min: 0,
+    max: hardMaxLevel ?? 999,
+    step: 1,
+    hint: hardMaxLevel
+      ? `留空 = 不看等级。填得再大也不会超过 ${hardMaxLevel} —— 那批在硬保护里已经拦下了`
+      : "留空 = 不看等级"
+  });
   const qualities = fQualities(c.qualities, eq.qualities);
   const keepRare = fBool("保留极品词条", c.keepRareRank !== false, "带极品词条的一律不拆");
   const keepAttrs = fAttrs(c.keepAttrs, eq.attrKeys);
@@ -542,9 +551,19 @@ function panelInventory(r, opts) {
     typeof eq.disposable === "number"
       ? `背包里可处理 ${eq.disposable} 件(共 ${eq.total} 件)。只看背包内、未锁定、未穿戴、未上架的装备。`
       : "只处理背包内、未锁定、未穿戴、未上架的装备。";
+  // 硬保护必须写在面板上:否则用户会以为"把等级上限调大"就能拆掉高级装备
+  const hardNote = hardMaxLevel
+    ? `硬保护(上面条件改不动):当前穿戴中的装备、等级高于 ${hardMaxLevel} 的装备、已上锁的装备一律不分解。等级读不到的也按不分解处理。`
+    : null;
 
   return {
-    node: el("div", { className: "op-form" }, el("p", { className: "hint", textContent: stat }), ...fields.map((f) => f.node)),
+    node: el(
+      "div",
+      { className: "op-form" },
+      el("p", { className: "hint", textContent: stat }),
+      ...(hardNote ? [el("p", { className: "hint warn", textContent: hardNote })] : []),
+      ...fields.map((f) => f.node)
+    ),
     read: () => {
       const conditions = { keepRareRank: keepRare.read() };
       const s = maxScore.read();

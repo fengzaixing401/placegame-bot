@@ -15,12 +15,13 @@ export class AccountDisabledError extends Error {
 // 按账号维护 GameApiClient 实例:独立 device-id、独立会话。
 // 会话令牌加密落库,重启后复用;失效由 api-client 自动重登并回写。
 export class AccountService {
-  constructor({ store, baseUrl, version, fetchImpl, timeoutMs = 15000 }) {
+  constructor({ store, baseUrl, version, fetchImpl, timeoutMs = 15000, logger = console }) {
     this.store = store;
     this.baseUrl = baseUrl;
     this.version = version;
     this.fetchImpl = fetchImpl;
     this.timeoutMs = timeoutMs;
+    this.logger = logger;
     this.clients = new Map();
   }
 
@@ -83,11 +84,22 @@ export class AccountService {
       onLogin: (token, expiresAt = null) => {
         this.store.setSession(row.id, token, expiresAt);
         this.store.resetAuthFailure(row.id);
-      }
+      },
+      onVersionChange: (next, from) => this.#adoptVersion(next, from)
     });
     if (secrets.sessionToken) client.setSession(secrets.sessionToken);
     this.clients.set(row.id, client);
     return client;
+  }
+
+  // 游戏升版本时,服务端会用 426 挡回旧版本。任何一个账号撞上都会走到这里:
+  // 把新版本推给所有已建客户端,免得每个账号各自撞一次 426 才跟上。
+  // 只改内存不落盘 —— 下次启动仍以 /updates/cli/latest.json 为准,那份才是权威。
+  #adoptVersion(next, from) {
+    if (this.version === next) return;
+    this.version = next;
+    for (const client of this.clients.values()) client.version = next;
+    this.logger?.log?.(`[version] 客户端版本 ${from} -> ${next}(服务端要求)`);
   }
 
   // 统一的动作入口:注入客户端、记录成功/失败、认证失败累计到阈值即熔断停用。

@@ -4,15 +4,56 @@ import { pickList, pickKey, num, text } from "../util.mjs";
 // CLI 那份写的是 listed/in_warehouse,真实服务端给的是 on_market,且没有仓库态。
 export const STATUS = { IN_BAG: "in_bag", EQUIPPED: "equipped", ON_MARKET: "on_market" };
 
+// 硬保护:与用户在面板上怎么配、规则里存了什么一概无关,任何分解路径都必须先过这一关。
+// 两条来自明确的运维约束 —— 不分解当前穿戴的装备、不分解等级高于 160 的装备。
+// 之所以叫"硬",是因为它不能被配置放宽:用户把等级上限填成 999、把品质勾满,
+// 也照样拆不动这两类。判定放在所有条件之前,顺序就是它的语义。
+// 声明在 EMPTY_SUMMARY 之前:占位摘要也要带上这个上限,前端才能把输入框卡在同一档。
+export const HARD_MAX_LEVEL = 160;
+
 // 分解条件表单在拿不到背包时的占位摘要。页面照它渲染出"一个复选框都没有",
 // 比渲染出 undefined 让前端自己兜底更可控。
-export const EMPTY_SUMMARY = { total: 0, disposable: 0, qualities: [], attrKeys: [], rareRanks: [] };
+// hardMaxLevel 不是背包数据而是约束常量,所以读不到背包时它照样有值。
+export const EMPTY_SUMMARY = {
+  total: 0,
+  disposable: 0,
+  qualities: [],
+  attrKeys: [],
+  rareRanks: [],
+  hardMaxLevel: HARD_MAX_LEVEL
+};
 
-// 可分解 = 在背包中且未上锁。已穿戴/已上架的靠 status 白名单排除 ——
-// 服务端不返回 equipped 字段,穿戴状态只体现在 status 上。
+// 命中硬保护返回原因字符串,没命中返回 null。
+//
+// 穿戴判定要同时看两个字段:status === "equipped" 是服务端的主口径,
+// item.equipped 是布尔口径。官方 CLI 的 equipmentStatus() 正是
+// `item.status === "equipped" || item.equipped` —— 只认一个,两者不一致时就漏判,
+// 而漏判的代价是拆掉身上正穿着的装备,不可逆。
+//
+// 等级读不到时按"受保护"处理:证明不了它不高于 160,就不能拆。
+// 这与本文件既有的"条件判不了就不能拆,宁可漏拆不能误拆"是同一条原则。
+export function hardProtection(row) {
+  if (!row) return "行数据缺失";
+  if (row.status === STATUS.EQUIPPED || row.equipped === true) return "当前穿戴中";
+  const level = num(row.level);
+  if (level === null) return `读不到等级,无法确认不高于 ${HARD_MAX_LEVEL}`;
+  if (level > HARD_MAX_LEVEL) return `等级 ${level} 高于 ${HARD_MAX_LEVEL}`;
+  if (row.locked === true) return "已上锁";
+  return null;
+}
+
+// auto 模式的兜底判定:等级读不到或高于硬上限,都算"无法保证不超 160"。
+// 与 hardProtection 同一条口径,单独抽出来是因为 auto 那边只关心等级这一维
+// (能不能拆由游戏侧规则决定,穿戴与否不由它判)。
+function levelUnsafe(row) {
+  const level = num(row?.level);
+  return level === null || level > HARD_MAX_LEVEL;
+}
+
+// 可分解 = 在背包中、未上锁、且未命中硬保护。已穿戴/已上架的靠 status 白名单排除。
 export function isDisposable(row) {
   if (!row) return false;
-  if (row.locked === true) return false;
+  if (hardProtection(row)) return false;
   return row.status === STATUS.IN_BAG;
 }
 
@@ -24,12 +65,12 @@ export function attrKeys(row) {
 // 分解条件判定。返回 {ok:true} 表示该拆,{ok:false,reason} 表示留着。
 // 读不到 score/level 时按"留着"处理 —— 条件判不了就不能拆,宁可漏拆不能误拆。
 export function matchesDecomposeRules(row, cond = {}) {
-  if (!isDisposable(row)) {
-    if (row?.locked === true) return { ok: false, reason: "已上锁" };
-    if (row?.status === STATUS.EQUIPPED) return { ok: false, reason: "已穿戴" };
-    if (row?.status === STATUS.ON_MARKET) return { ok: false, reason: "已上架" };
-    return { ok: false, reason: `不在背包(status=${row?.status ?? "未知"})` };
-  }
+  // 硬保护先行:用户条件只能在其之上继续收紧,永远不能把它放宽
+  const hard = hardProtection(row);
+  if (hard) return { ok: false, reason: hard };
+
+  if (row?.status === STATUS.ON_MARKET) return { ok: false, reason: "已上架" };
+  if (row?.status !== STATUS.IN_BAG) return { ok: false, reason: `不在背包(status=${row?.status ?? "未知"})` };
 
   if (cond.keepRareRank !== false && row.rareRank) {
     return { ok: false, reason: `极品词条 ${row.rareRank}` };
@@ -46,6 +87,8 @@ export function matchesDecomposeRules(row, cond = {}) {
     if (score >= cond.maxScore) return { ok: false, reason: `评分 ${score} 不低于 ${cond.maxScore}` };
   }
 
+  // 等级上限只能比硬上限更紧。用户填得比 160 松没有意义 ——
+  // 高于 160 的那批在上面 hardProtection 里已经被拦下了。
   if (typeof cond.maxLevel === "number") {
     const level = num(row.level);
     if (level === null) return { ok: false, reason: "读不到等级,未按等级条件处理" };
@@ -96,11 +139,42 @@ export async function listInventory(api) {
 // ② 背包一键分解。
 // auto 模式走服务端自己的 auto-decompose 规则(条件在游戏里配,本程序无从预览);
 // explicit 模式按 conditions 在本地筛,能逐件给出拆/留的原因。
+// 三条路径都必须先过硬保护:穿戴中的装备、等级高于 160 的装备一律不拆。
 export async function decompose(api, { mode = "auto", equipmentIds, conditions = {}, dryRun = false } = {}) {
-  // 调用方点名了具体装备:直接拆这些,不再套条件
+  // 调用方点名了具体装备。这条路径不套 conditions,但绝不能因此绕过硬保护 ——
+  // 它能从 REST 直接触达(POST /accounts/:label/inventory/decompose 带 equipmentIds),
+  // 不校验就等于开了一个"把身上装备和高级装备交出去"的后门。
+  // 所以先拉一次装备列表逐件核对,查无此 id 的也一并拒绝(宁可少拆)。
   if (Array.isArray(equipmentIds) && equipmentIds.length > 0) {
-    const run = await runDecompose(api, equipmentIds, dryRun);
-    return { mode: "explicit", scanned: equipmentIds.length, matched: equipmentIds.length, ...run };
+    const all = await listEquipment(api);
+    const byId = new Map(all.map((row) => [pickKey(row), row]));
+    const allowed = [];
+    const refused = [];
+    for (const id of equipmentIds) {
+      const row = byId.get(id);
+      if (!row) {
+        refused.push({ equipmentId: id, reason: "不在装备列表(可能已消失或 id 有误)" });
+        continue;
+      }
+      const hard = hardProtection(row);
+      if (hard) {
+        refused.push(digest(row, hard));
+        continue;
+      }
+      allowed.push(id);
+    }
+    const out = {
+      mode: "explicit",
+      dryRun,
+      scanned: equipmentIds.length,
+      matched: allowed.length,
+      refusedCount: refused.length,
+      targets: allowed.map((id) => digest(byId.get(id))),
+      refused
+    };
+    // 全被拦下时一个请求都不发 —— 不为"拆 0 件"去打一次写接口
+    if (allowed.length === 0) return { ...out, equipmentIds: [], result: null };
+    return { ...out, ...(await runDecompose(api, allowed, dryRun)) };
   }
 
   if (mode === "auto") {
@@ -108,6 +182,16 @@ export async function decompose(api, { mode = "auto", equipmentIds, conditions =
     // 页面上的"预览"按钮就成了真拆装备 —— 必须显式拒绝而不是静默执行。
     if (dryRun) {
       throw new Error("auto 模式没有预览端点(游戏侧只提供直接执行)。要预览请切到 explicit 模式,或改用 auto 模式的「确定执行」。");
+    }
+    // auto 拆哪些由游戏侧规则决定,本程序看不到那份规则,也就没法在本地兜住硬保护。
+    // 唯一能保证约束的做法:开跑前确认背包里不存在"等级读不到或高于 160"的装备。
+    // 有就拒绝 —— 那正是约束要求绝不能拆的东西,而我们没有任何办法确认游戏不会拆它。
+    const all = await listEquipment(api);
+    const unsafe = all.filter((row) => row?.status === STATUS.IN_BAG && levelUnsafe(row));
+    if (unsafe.length > 0) {
+      throw new Error(
+        `auto 模式无法保证「不分解等级高于 ${HARD_MAX_LEVEL} 的装备」:背包里有 ${unsafe.length} 件等级读不到或高于 ${HARD_MAX_LEVEL} 的装备,而游戏侧的自动分解规则本程序无法预览。请改用 explicit 模式(本程序逐件判定并给出理由),或先在游戏内把自动分解规则收紧。`
+      );
     }
     return { mode: "auto", result: await api.post("/api/equipment/auto-decompose", {}) };
   }
@@ -169,7 +253,9 @@ export async function equipmentSummary(api) {
     disposable,
     qualities: [...qualities].map(([quality, count]) => ({ quality, count })).sort((a, b) => b.count - a.count),
     attrKeys: [...attrs].sort(),
-    rareRanks: [...rareRanks]
+    rareRanks: [...rareRanks],
+    // 带上硬上限,前端把等级输入框卡在同一档 —— 前端不另存一份常量,免得两边漂移
+    hardMaxLevel: HARD_MAX_LEVEL
   };
 }
 

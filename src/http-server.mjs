@@ -129,7 +129,8 @@ export function createHttpServer({ config, service, store, settings, scheduler, 
     /^\/health\/ready$/,
     async () => ({
       status: "ready",
-      version,
+      // 读 service 上的实时值:撞到 426 自愈后版本会变,启动时的快照会显示成旧的
+      version: service?.version ?? version,
       accounts: store.list().length,
       enabledAccounts: store.list({ enabledOnly: true }).length,
       scheduler: scheduler?.status() ?? { enabled: false },
