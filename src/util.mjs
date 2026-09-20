@@ -9,6 +9,12 @@
 // 从一行数据里取"引用键"——镜像官方 CLI 的 preferred 字段优先级。
 // 各列表端点(装备/物品/邮件/公会对象/首领/副职动作)的每条目都带其一,
 // 用首个命中的字段作为该行的稳定标识;若都没有,则退化到 key 或 id。
+//
+// **注意:这是"best-effort",字段名不在这份名单里的行别用它。**
+// 名单里 guildId 排在 key 前面,所以对"带 guildId、但真正的键在别的字段上"的行
+// (典型是 boss/world-status 的场次行,它的键是 bossKey)会挑错。
+// 实测 2026-09-20:场次行被取成 "guild_f94d47f149f3",日志里就查不到中文名了。
+// 这类行请直接读它自己的字段名。
 const PREFERRED = ["id", "userId", "guildId", "orderId", "equipmentId", "itemId", "mailId", "noticeId", "key"];
 
 // 按候选字段名依次取第一个"有值"的字段。"" / null / undefined 都算没有。

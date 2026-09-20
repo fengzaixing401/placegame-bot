@@ -462,7 +462,11 @@ const WORLD_STATUS_FIELDS = [
 
 export function digestWorldStatus(list) {
   return asArray(list).map((s) => ({
-    bossKey: pickKey(s),
+    // 这里**不能用 pickKey()**:它的 PREFERRED 名单里 guildId 排在 key 前面
+    // (util.mjs),而场次行恰好带 guildId、不带 id —— 实测会把公会 ID
+    // "guild_f94d47f149f3" 当成首领键,日志里就查不到中文名了。
+    // 场次行的首领键字段名是确定的,直接用 bossKey。
+    bossKey: text(s?.bossKey) ?? pickKey(s),
     instanceId: text(s?.instanceId),
     ...pickFields(s, WORLD_STATUS_FIELDS),
     ...(text(s?.status) ? { status: text(s.status) } : {})

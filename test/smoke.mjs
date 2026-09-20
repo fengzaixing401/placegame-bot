@@ -976,20 +976,27 @@ check(
 
 // 世界首领的场次快照同样裁过:渲染层只读 status/hpPercent/participantCount,
 // 但 instanceId 要留着 —— 它带窗口小时,排查「这轮拿到的是哪一场」全靠它。
+// bossKey 必须取 bossKey 本身:场次行带 guildId 不带 id,而 pickKey 的 PREFERRED
+// 名单里 guildId 排在 key 前面,用它会取成公会 ID(实测踩过,日志里就查不到中文名)。
 const wbDigest = bossFeature.digestWorldStatus([
   {
-    bossKey: "b1",
-    instanceId: "wb_b1_2026_09_20_14",
+    bossKey: "scarlet_duke",
+    instanceId: "wb_scarlet_duke_2026_09_20_20",
     status: "active",
     hpPercent: 90,
     participantCount: 3,
-    guildId: "guild_x",
+    guildId: "guild_f94d47f149f3",
     junk: "x".repeat(500)
   }
 ]);
 check(
+  "场次快照取 bossKey 而不是 guildId",
+  wbDigest[0]?.bossKey === "scarlet_duke",
+  JSON.stringify(wbDigest[0]?.bossKey)
+);
+check(
   "场次快照留 instanceId、丢掉无关字段",
-  wbDigest[0]?.instanceId === "wb_b1_2026_09_20_14" &&
+  wbDigest[0]?.instanceId === "wb_scarlet_duke_2026_09_20_20" &&
     wbDigest[0]?.status === "active" &&
     wbDigest[0]?.junk === undefined,
   JSON.stringify(wbDigest[0])
