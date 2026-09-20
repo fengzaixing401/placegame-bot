@@ -235,7 +235,40 @@ function fakeFetch(url, opts = {}) {
         ? reply({ predictedWin: false, chance: 30 })
         : reply({ predictedWin: true, chance: 95 });
     case "/api/boss/challenge":
-      return reply({ battle: { win: true }, rewards: { summary: ["金币"] } });
+      // 真号形状:战斗详情 + 消耗 + 掉落,外加几百条 notices。
+      // notices 正是真实响应里撑爆 result_json 的元凶(实测单次 700+ 条),
+      // 这里照造,用来验证「落库前已裁掉它、明细不再被截断」。
+      return reply({
+        battle: {
+          win: true,
+          rounds: 12,
+          durationSeconds: 34,
+          winChance: 97,
+          playerHpRemaining: 812,
+          playerHp: 1000,
+          bossHpRemaining: 0,
+          bossHp: 900000
+        },
+        cost: {
+          ticketCost: 1,
+          ownedTickets: 4,
+          goldCost: 55800,
+          materialCost: 8,
+          materialName: "火晶石",
+          materialKey: "fire_crystal",
+          ownedMaterial: 3323
+        },
+        rewards: {
+          summary: ["金币"],
+          exp: 120,
+          gold: 3400,
+          drops: [{ name: "霜火护腕", quality: "gold", rareRank: "极品" }]
+        },
+        notices: Array.from({ length: 700 }, (_, i) => ({
+          seq: i,
+          text: `战斗日志第 ${i} 条,用来模拟真号响应里的体量`
+        }))
+      });
     // 真号形状:顶层 damage,场次进度在 worldBoss 段。没有 cost 字段 —— 协作不扣门票。
     case "/api/boss/assist": {
       if (!assistState.frozen) assistState.my += 1;
@@ -906,6 +939,61 @@ check(
 // 读不到池子就不猜次数,退回老行为打一次
 check("读不到池子时预算为 1", budget([{}], {}, false) === 1);
 check("没设次数时按池子容量吃满", budget(poolRow(), {}, false) === 5);
+
+console.log("\n[3c] 首领明细落库前压成摘要");
+// 真号一次挑战的响应里带着 700+ 条 notices,原样塞进 result 会让 result_json 超限、
+// 退化到最狠的裁剪档(maxArray 5 / maxDepth 4)—— 面板上只剩「[对象,超出深度]」,
+// 9 次挑战只能看到 5 条,连消耗和掉落都看不到。现在在 feature 层就裁成渲染器要的那几个字段。
+const digestRun = await service.run("fzx401", (api, row) =>
+  actions["boss.map"](api, row, { rules: { mapBosses: ["boss_map_1"], mapMaxPerRun: 1 } })
+);
+const dAttempt = digestRun.attempted?.[0] ?? {};
+check(
+  "战斗详情保留了渲染器要的字段",
+  dAttempt.result?.battle?.rounds === 12 &&
+    dAttempt.result?.battle?.winChance === 97 &&
+    dAttempt.result?.battle?.win === true,
+  JSON.stringify(dAttempt.result?.battle)
+);
+check(
+  "消耗与掉落保留",
+  dAttempt.result?.cost?.ticketCost === 1 &&
+    dAttempt.result?.cost?.materialName === "火晶石" &&
+    dAttempt.result?.rewards?.drops?.[0]?.rareRank === "极品",
+  JSON.stringify({ cost: dAttempt.result?.cost, rewards: dAttempt.result?.rewards })
+);
+check("撑爆体积的 notices 已丢弃", !JSON.stringify(dAttempt.result).includes("notices"), "result 里还带着 notices");
+
+// 关键:按落库的第一档裁剪后不该出现任何占位符 —— 出现就说明又超限,
+// 面板会再次退化成「[对象,超出深度]」。
+const { compactForStore } = await import("../src/util.mjs");
+const packedResult = JSON.stringify(compactForStore(digestRun, { maxString: 400, maxArray: 20, maxDepth: 8 }));
+check(
+  "裁剪后无占位符且远低于上限",
+  !packedResult.includes("另有") && !packedResult.includes("超出深度") && packedResult.length <= 60000,
+  `len=${packedResult.length}`
+);
+
+// 世界首领的场次快照同样裁过:渲染层只读 status/hpPercent/participantCount,
+// 但 instanceId 要留着 —— 它带窗口小时,排查「这轮拿到的是哪一场」全靠它。
+const wbDigest = bossFeature.digestWorldStatus([
+  {
+    bossKey: "b1",
+    instanceId: "wb_b1_2026_09_20_14",
+    status: "active",
+    hpPercent: 90,
+    participantCount: 3,
+    guildId: "guild_x",
+    junk: "x".repeat(500)
+  }
+]);
+check(
+  "场次快照留 instanceId、丢掉无关字段",
+  wbDigest[0]?.instanceId === "wb_b1_2026_09_20_14" &&
+    wbDigest[0]?.status === "active" &&
+    wbDigest[0]?.junk === undefined,
+  JSON.stringify(wbDigest[0])
+);
 
 console.log("\n[3b] WebUI 只读视图");
 // options 的返回结构就是前端契约(src/web/app.js 按这些键渲染),所以键集必须钉死:

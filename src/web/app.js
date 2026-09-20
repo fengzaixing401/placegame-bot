@@ -762,6 +762,73 @@ function bossGates(r, { ticketHint }) {
   };
 }
 
+// 战斗参数:出战技能、战术增益、挑战词缀、材料强化。
+// 规则树里各只有一份,个人首领与地图首领共用(和 bossGates 一样),两个面板都能改。
+//
+// 这一组原先在页面上**完全没有入口** —— bot 已经从游戏取了 challengeOptions 并放进
+// /accounts/:id/options 的响应里,但前端一个都没渲染,于是 selectedSkillKeys 只能
+// 一直是空的。代价实测过:霜火君王噩梦档不带技能预测胜率 18%、带满 20 个是 97%,
+// 而胜率闸门是开的,结果一整轮 9 次全败 —— 不是打不过,是没带装备上场。
+function bossCombat(r, opts) {
+  const co = opts?.challengeOptions ?? {};
+  const asRows = (v) => (Array.isArray(v) ? v.filter((x) => x && x.key) : []);
+  const skills = asRows(co.skills);
+  const buffs = asRows(co.buffs);
+  const affixes = asRows(co.affixes);
+
+  // 单选下拉的候选。游戏这次没返回清单时,把已存的值补进去 ——
+  // 否则 select 会渲染成空的,一存就把用户的设置冲掉了(同 fDifficulty 的坑)。
+  const selectOptions = (rows, value, word) => {
+    const list = rows.map((x) => [x.key, x.name ?? x.key]);
+    if (value && !list.some(([k]) => k === value)) list.unshift([value, `${value}(${word})`]);
+    return list;
+  };
+
+  const skillList = fChecklist("出战技能", r.boss?.selectedSkillKeys, skills.map((s) => s.key), {
+    wrap: true,
+    toLabel: (k) => {
+      const hit = skills.find((s) => s.key === k);
+      if (!hit) return k;
+      return typeof hit.level === "number" ? `${hit.name} Lv${hit.level}` : hit.name;
+    },
+    hint: skills.length
+      ? "不带技能就是裸档胜率 —— 实测霜火君王噩梦档 18%,带满 20 个是 97%。胜率够高时不必为了稳而降难度。与地图首领共用这项设置"
+      : "游戏这次没返回技能清单,已存的选择会保留;要改先刷新页面"
+  });
+  const buff = fSelect(
+    "战术增益",
+    r.boss?.buffKey || "none",
+    selectOptions(buffs, r.boss?.buffKey || "none", "游戏未返回此档"),
+    "与地图首领共用。实测三个增益的预测胜率一致 —— 影响的是打法,不是胜负判定"
+  );
+  const affix = fSelect(
+    "挑战词缀",
+    r.boss?.affixKey || "none",
+    selectOptions(
+      affixes.map((a) => ({
+        key: a.key,
+        // 词缀的价值在奖励倍率上,直接写进选项文字,别让人去别处查
+        name: a.rewardMultiplier && a.rewardMultiplier !== 1 ? `${a.name ?? a.key}(奖励 ×${a.rewardMultiplier})` : (a.name ?? a.key)
+      })),
+      r.boss?.affixKey || "none",
+      "游戏未返回此档"
+    ),
+    "词缀会降裸档胜率(狂暴迫近 18%→16%),但带上技能后这点惩罚被吸收,所以奖励倍率是白拿的"
+  );
+  const boost = fBool("使用材料强化", r.boss?.useMaterialBoost === true, "会消耗材料。实测对预测胜率没有影响");
+
+  return {
+    nodes: [skillList.node, buff.node, affix.node, boost.node],
+    into: (out) => {
+      out.selectedSkillKeys = skillList.read();
+      out.buffKey = buff.read();
+      out.affixKey = affix.read();
+      out.useMaterialBoost = boost.read();
+      return out;
+    }
+  };
+}
+
 // 个人首领:每日免费次数有限,用尽后服务端自动扣门票。安全闸门是必须点名要打哪几个。
 function panelBossPersonal(r, opts) {
   const rows = bossesOf(opts, "personal");
@@ -789,13 +856,16 @@ function panelBossPersonal(r, opts) {
   const gates = bossGates(r, {
     ticketHint: "免费次数用尽后服务端会自动扣票;关闭则次数用尽就停手。与地图首领共用这项设置"
   });
+  const combat = bossCombat(r, opts);
 
   const payload = () => {
-    const out = gates.into({
-      personalDifficulty: difficulty.read(),
-      personalBosses: list.read(),
-      challengePersonal: schedule.read()
-    });
+    const out = combat.into(
+      gates.into({
+        personalDifficulty: difficulty.read(),
+        personalBosses: list.read(),
+        challengePersonal: schedule.read()
+      })
+    );
     const n = perDay.read();
     if (n !== null) out.personalMaxPerDay = n;
     const t = at.read();
@@ -803,7 +873,17 @@ function panelBossPersonal(r, opts) {
     return out;
   };
   return {
-    node: el("div", { className: "op-form" }, difficulty.node, list.node, perDay.node, at.node, schedule.node, ...gates.nodes),
+    node: el(
+      "div",
+      { className: "op-form" },
+      difficulty.node,
+      list.node,
+      perDay.node,
+      at.node,
+      schedule.node,
+      ...gates.nodes,
+      ...combat.nodes
+    ),
     // 整块覆盖:面板里取消勾选必须能生效,逐字段兜底会让取消永远无效
     read: () => ({ rules: payload() }),
     toRules: () => ({ boss: payload() })
@@ -812,9 +892,9 @@ function panelBossPersonal(r, opts) {
 
 // 地图首领:刷新周期短,默认打列表里所有可挑战的。
 function panelBossMap(r, opts) {
-  // 游戏里「地图首领」这一栏是 12 个:接口 type=map 的 5 个 + type=world 的 7 个。
-  // 那 7 个在这里是可挑战目标(受地图规则约束),在世界首领面板才是协作目标 ——
-  // 同一个首领两种玩法各一套规则,所以两个面板都要列出它。
+  // 游戏里「地图首领」这一栏 2026-09-20 实测是 14 个:接口 type=map 的 6 个 + type=world 的 8 个。
+  // 那 8 个在这里是可挑战目标(受地图规则约束),在世界首领面板才是协作目标 ——
+  // 同一个首领两种玩法各一套规则,所以两个面板都要列出它。数量会随游戏加首领变,别写死。
   const rows = [...bossesOf(opts, "map"), ...bossesOf(opts, "world")];
   let list;
   const difficulty = fDifficulty("难度", r.boss?.difficulty, opts?.difficulties, {
@@ -823,7 +903,7 @@ function panelBossMap(r, opts) {
   list = fBossList("要打哪几个", r.boss?.mapBosses, rows, {
     allowAll: true,
     hint:
-      "共 12 个。其中 7 个同时也是世界首领 —— 在这里是挑战(用本面板的难度与闸门)," +
+      `共 ${rows.length} 个。其中世界首领那批同时也是世界首领 —— 在这里是挑战(用本面板的难度与闸门),` +
       "在世界首领面板是协作(只参与、没有难度)。两种玩法各走各的规则,互不影响",
     describe: (row) => bossRowHint(row, difficulty.read())
   });
@@ -831,21 +911,30 @@ function panelBossMap(r, opts) {
   const maxRun = fNum("本次最多挑战几个", r.boss?.mapMaxPerRun, {
     min: 1,
     max: 50,
-    hint: "这一栏共 12 个,填小于 12 会把后面几个静默截掉。与个人首领的次数是两个独立设置",
+    hint: `这一栏现在共 ${rows.length} 个,填小于它会静默截掉后面几个。与个人首领的次数是两个独立设置`,
     required: true
   });
   const gates = bossGates(r, {
     ticketHint: "困难档扣 1 张、噩梦档扣 2 张;关闭则这两档一律跳过。与个人首领共用这项设置"
   });
+  const combat = bossCombat(r, opts);
 
   const payload = () => {
-    const out = gates.into({ difficulty: difficulty.read(), mapBosses: list.read() });
+    const out = combat.into(gates.into({ difficulty: difficulty.read(), mapBosses: list.read() }));
     const mx = maxRun.read();
     if (mx !== null) out.mapMaxPerRun = mx;
     return out;
   };
   return {
-    node: el("div", { className: "op-form" }, difficulty.node, list.node, maxRun.node, ...gates.nodes),
+    node: el(
+      "div",
+      { className: "op-form" },
+      difficulty.node,
+      list.node,
+      maxRun.node,
+      ...gates.nodes,
+      ...combat.nodes
+    ),
     read: () => ({ rules: payload() }),
     toRules: () => ({ boss: payload() })
   };

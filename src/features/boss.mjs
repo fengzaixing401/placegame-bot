@@ -1,4 +1,4 @@
-import { pickList, pickKey, num, bool, text, firstNum, firstBool, asSet } from "../util.mjs";
+import { pickList, pickKey, num, bool, text, firstNum, firstBool, asSet, asArray } from "../util.mjs";
 import { dynamicView } from "./collect.mjs";
 import { difficulty as difficultyLabel } from "../labels.mjs";
 
@@ -371,6 +371,104 @@ function expandPersonalBudget(candidates, rules, useTickets) {
 // 五、编排
 // ============================================================================
 
+// ---- 落库前的裁剪 ----
+// 每次挑战/预览的原始响应里带着 700+ 条 notices,整个塞进 result 会让 result_json
+// 必然超限、退化到最狠的裁剪档(maxArray 5 / maxDepth 4)—— 面板上只剩
+// 「[对象,超出深度]」,9 次挑战只能看到 5 条,连消耗和掉落都看不到(2026-09-20 实测)。
+// 这里按 log.js 的 bossAttempt() 实际读到的字段裁剪:**多留只会再次撑爆,少留则日志凭空少一行**。
+const BATTLE_FIELDS = [
+  "win",
+  "rounds",
+  "durationSeconds",
+  "winChance",
+  "playerHpRemaining",
+  "playerHp",
+  "bossHpRemaining",
+  "bossHp"
+];
+
+// 只留有值的数值/布尔字段 —— 一堆 null 也是白占体积
+function pickFields(source, fields) {
+  const out = {};
+  for (const k of fields) {
+    const v = source?.[k];
+    if (typeof v === "number" || typeof v === "boolean") out[k] = v;
+  }
+  return out;
+}
+
+// 掉落只留能拼出人话的三个字段(log.js 只读 name/quality/rareRank)
+function digestDrops(drops) {
+  return asArray(drops)
+    .slice(0, 20)
+    .map((d) => ({ name: text(d?.name), quality: text(d?.quality), rareRank: text(d?.rareRank) }));
+}
+
+export function digestChallengeResult(result) {
+  if (!result || typeof result !== "object") return null;
+  const { battle, rewards, cost } = result;
+  const summary = rewards?.summary;
+  const bottleneck = text(battle?.powerBottleneck);
+  return {
+    battle:
+      battle && typeof battle === "object"
+        ? { ...pickFields(battle, BATTLE_FIELDS), ...(bottleneck ? { powerBottleneck: bottleneck } : {}) }
+        : null,
+    rewards:
+      rewards && typeof rewards === "object"
+        ? {
+            // summary 可能是数组也可能是一句话,原样带过去让渲染层自己 take()
+            summary: Array.isArray(summary) ? summary.slice(0, 20) : (typeof summary === "string" ? summary : null),
+            exp: num(rewards.exp),
+            gold: num(rewards.gold),
+            drops: digestDrops(rewards.drops)
+          }
+        : null,
+    cost:
+      cost && typeof cost === "object"
+        ? {
+            ticketCost: num(cost.ticketCost),
+            ownedTickets: num(cost.ownedTickets),
+            goldCost: num(cost.goldCost),
+            materialCost: num(cost.materialCost),
+            materialName: text(cost.materialName),
+            materialKey: text(cost.materialKey),
+            ownedMaterial: num(cost.ownedMaterial)
+          }
+        : null
+  };
+}
+
+// 预览响应里渲染层只用 forecast(它已经在外面单独读过),其余全丢。
+export function digestPreviewResult(result) {
+  return result && typeof result === "object" ? pickFields(result, ["chance", "predictedWin"]) : null;
+}
+
+// 世界首领场次快照。渲染层只读 status/hpPercent/participantCount,
+// 但 instanceId 留着 —— 它带窗口小时,排查「这一轮拿到的是哪一场」全靠它
+// (2026-09-20 就是靠 `wb_..._14` 认出 16:00 那轮打的是已结束的 14:00 场)。
+const WORLD_STATUS_FIELDS = [
+  "status",
+  "hpPercent",
+  "participantCount",
+  "currentHp",
+  "maxHp",
+  "completedPhaseCount",
+  "endedAt",
+  "guildDamage",
+  "guildMemberCount",
+  "maxAttemptCount"
+];
+
+export function digestWorldStatus(list) {
+  return asArray(list).map((s) => ({
+    bossKey: pickKey(s),
+    instanceId: text(s?.instanceId),
+    ...pickFields(s, WORLD_STATUS_FIELDS),
+    ...(text(s?.status) ? { status: text(s.status) } : {})
+  }));
+}
+
 // ⑤ 按规则挑战首领。
 // 地图首领与个人首领分开控制:个人首领必须 challengePersonal=true 且显式列出目标,
 // 否则一次自动运行就会把免费次数打光甚至扣掉门票。
@@ -449,7 +547,7 @@ export async function runBosses(api, { types, rules = {}, maxChallenges = 5, dry
     try {
       if (dryRun) {
         const result = await preview(api, key, bossRules);
-        out.attempted.push({ ...label, dryRun: true, forecast: readForecast(result), result });
+        out.attempted.push({ ...label, dryRun: true, forecast: readForecast(result), result: digestPreviewResult(result) });
         continue;
       }
 
@@ -460,7 +558,13 @@ export async function runBosses(api, { types, rules = {}, maxChallenges = 5, dry
       }
 
       const result = await challenge(api, key, bossRules);
-      out.attempted.push({ ...label, dryRun: false, forecast: verdict.forecast, win: result?.battle?.win, result });
+      out.attempted.push({
+        ...label,
+        dryRun: false,
+        forecast: verdict.forecast,
+        win: result?.battle?.win,
+        result: digestChallengeResult(result)
+      });
 
       // 夹在 0:整轮次数可以超过免费额度(超出部分扣门票),真号上出现过
       // 免费余 4 打了 5 次、日志显示"免费余 -1"。免费次数不存在负数。
@@ -531,10 +635,12 @@ async function assistUntilExhausted(api, label, out) {
 // 服务端虽然也接受 challenge,但那会按困难/噩梦档扣掉门票,与"只参与协作"的本意相反。
 export async function runWorldBoss(api, { rules = {} } = {}) {
   const out = { status: null, assisted: [], skipped: [], claimed: null, errors: [] };
-  out.status = await worldStatus(api).catch((err) => {
-    out.errors.push({ step: "worldStatus", error: err.message });
-    return null;
-  });
+  out.status = await worldStatus(api)
+    .then((list) => digestWorldStatus(list))
+    .catch((err) => {
+      out.errors.push({ step: "worldStatus", error: err.message });
+      return null;
+    });
 
   // 名单取不到就带着已记下的错误返回,不抛 —— 抛出去会让整个任务 status=error、
   // result_json 为空,日志上只剩一句"请求超时",看不出这一轮到底做了什么。
