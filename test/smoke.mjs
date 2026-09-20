@@ -322,6 +322,21 @@ try {
   check("代码读到的变量都有文档", undocumented.length === 0, `文档缺失:${undocumented.join(", ")}`);
 }
 
+// 世界首领的开放时间以游戏自报的 refreshText 为准:
+// 「每天 10:00–11:00 / 14:00–15:00 / 20:00–21:00」。这里钉死默认值 ——
+// 曾经写的是 16:00–17:00,于是 16:00 那轮拿到的还是 14:00 那场(15:00 已结束),
+// 整轮 7 个首领全报「世界首领场次已变化、门票不足或攻击失败。」,还漏掉了整个 14:00 窗口。
+check(
+  "世界首领默认窗口与游戏 refreshText 一致",
+  JSON.stringify(config.defaultRules.boss.worldWindows) ===
+    JSON.stringify([
+      { start: "10:00", end: "11:00" },
+      { start: "14:00", end: "15:00" },
+      { start: "20:00", end: "21:00" }
+    ]),
+  JSON.stringify(config.defaultRules.boss.worldWindows)
+);
+
 console.log("\n[2] unwrap 处理 patch 包装");
 check("omit 直取 data", unwrap({ ok: true, data: { a: 1 } }).a === 1);
 check("patch 取 data.result", unwrap({ ok: true, data: { result: { a: 2 }, statePatch: {} } }).a === 2);

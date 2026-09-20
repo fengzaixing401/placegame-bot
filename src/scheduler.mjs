@@ -47,7 +47,7 @@ function summarizeFailures(messages) {
 const ROLL_MARGIN_MS = 3 * 60 * 1000;
 
 // 时区换算:取指定 IANA 时区下的日期与分钟数。排程必须按 Asia/Shanghai 判断
-// 游戏的时间窗口(世界首领 10-11/16-17/20-21 点、每日刷新),不能用容器本地时区。
+// 游戏的时间窗口(世界首领 10-11 / 14-15 / 20-21 点、每日刷新),不能用容器本地时区。
 export function zonedParts(date, timeZone) {
   const fmt = new Intl.DateTimeFormat("en-CA", {
     timeZone,
