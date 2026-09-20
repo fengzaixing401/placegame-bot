@@ -990,6 +990,21 @@ const { isBenignError } = await import("../src/labels.mjs");
 
 check("良性提示认作良性", isBenignError("今日已领取。") === true && isBenignError("本场世界首领最多参与 3 次。") === true);
 check("真故障不认作良性", isBenignError("当前客户端版本过低，必须更新到 0.2.64 后才能继续游戏。") === false);
+// 实测踩过的两次误判,各钉一条:
+// ① 泛词「不足」会把真失败当良性 —— 2026-09-20 那轮 7 个世界首领全挂却记成 ok
+check("含「不足」的真失败不算良性", isBenignError("世界首领场次已变化、门票不足或攻击失败。") === false);
+// ② 「没有可领取」是"无事可做",不是故障 —— 否则当天没分红就把公会任务染成 partial
+check("「没有可领取」算良性", isBenignError("当前没有可领取的公会分红。") === true);
+
+// 用真号那一轮的形状跑一遍:7 个首领全部失败 ⇒ 必须收得到,不能再是 0
+const worldFail = {
+  status: [{ bossKey: "golden_goblet_guard" }],
+  assisted: [],
+  skipped: [{ bossKey: "bloodmoon_annihilator", reason: "需要达到 1 转且等级达到 200 级。" }],
+  claimed: false,
+  errors: Array.from({ length: 7 }, () => ({ bossKey: "x", round: 1, error: "世界首领场次已变化、门票不足或攻击失败。" }))
+};
+check("世界首领整轮失败能被识别", collectRealFailures(worldFail).length === 7, String(collectRealFailures(worldFail).length));
 
 const VERSION_ERR = "当前客户端版本过低，必须更新到 0.2.64 后才能继续游戏。";
 const mixed = collectRealFailures({
