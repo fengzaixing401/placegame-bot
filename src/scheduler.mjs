@@ -40,11 +40,10 @@ function summarizeFailures(messages) {
   return `${uniq.length} 项失败:${head}${more}`.slice(0, 500);
 }
 
-// 滚动排程在间隔之上额外加的余量。地图首领的刷新是"每个首领各自从上次挑战起算 2 小时"
-// (服务端自报 refreshText「地图首领每 2 小时刷新」),而一轮里几个首领是依次打的、
-// 整轮发起时刻本身还带 tick 抖动 —— 不留余量就会贴着刷新边界,整轮全被拦。
-// 3 分钟足够盖住这两项,代价只是每轮往后挪 3 分钟(每天少跑不到半轮)。
-const ROLL_MARGIN_MS = 3 * 60 * 1000;
+// 地图首领刷新后等多久才发起挑战。服务端自报 refreshText「地图首领每 2 小时刷新」,
+// 刷新边界是**绝对周期**(与北京时间的偶数点重合),所以起跑时刻固定取「边界 + 这个余量」。
+// 3 分钟足够盖住服务端刷新的抖动;贴着边界(0 余量)发起会有一半轮次整轮被拦。
+const MAP_REFRESH_MARGIN_MS = 3 * 60 * 1000;
 
 // 时区换算:取指定 IANA 时区下的日期与分钟数。排程必须按 Asia/Shanghai 判断
 // 游戏的时间窗口(世界首领 10-11 / 14-15 / 20-21 点、每日刷新),不能用容器本地时区。
@@ -86,7 +85,8 @@ export function activeWindow(parts, windows) {
 
 // 幂等键决定"同一件事不重复做":
 // - interval 型:用 UTC 时间片编号(floor(now/间隔)),同一时间片内只跑一次
-// - rolling 型:用上一轮的起跑时刻,凑够"间隔 + 余量"才排下一轮(见 ROLL_MARGIN_MS)
+// - aligned 型:用"边界 + 余量"折算出的格子序号,同一个刷新格子里只跑一次
+//   (地图首领 —— 服务端的刷新是绝对周期,起跑时刻要对齐到它)
 // - daily 型:用账号时区的日期
 // - window 型:用日期 + 窗口标识
 export class Scheduler {
@@ -141,7 +141,7 @@ export class Scheduler {
   async #runAccount(account, now) {
     const rules = rulesFor(this.config, account.rules_json ? JSON.parse(account.rules_json) : null);
     const parts = zonedParts(now, this.config.timezone);
-    const jobs = this.plannedJobs(rules, parts, now, (jobKey) => this.#lastRunAt(account.id, jobKey));
+    const jobs = this.plannedJobs(rules, parts, now);
     const ran = [];
     for (const job of jobs) {
       // 单任务失败不影响该账号的其他任务
@@ -156,21 +156,24 @@ export class Scheduler {
   }
 
   // 产出本 tick 应当尝试的任务(带幂等键)。是否真正执行由 job_runs 唯一约束裁决。
-  // lastRunOf(jobKey) 给出该任务上一轮的起跑时刻(ISO,没跑过给 null),供滚动型任务定次数。
+  // lastRunOf(jobKey) 给出该任务上一轮的起跑时刻(ISO,没跑过给 null)。
+  // 现在只有测试还在传它 —— 地图首领改对齐排程后,排程不再依赖"上一轮什么时候跑的"。
   plannedJobs(rules, parts, now, lastRunOf = () => null) {
     const jobs = [];
     const slot = (hours) => Math.floor(now.getTime() / (hours * 3600 * 1000));
 
-    // 滚动型:排下一轮的时刻由上一轮起跑时刻决定,而不是切绝对时间片。
-    // 绝对时间片的片界固定(2 小时片就落在偶数点整),与游戏的刷新周期同频,
-    // 于是每轮都贴着刷新边界发起,约一半的轮次整轮被服务端拦掉 —— 实测就是这样丢掉的。
-    // 幂等键取上一轮时刻:成功一轮键就变一次,天然幂等;失败/空转的那一轮也会推进,
-    // 所以不存在"键不变 + 到期不了"的死锁。
-    const rolling = (key, hours) => {
-      const last = lastRunOf(key);
-      const lastMs = last ? Date.parse(last) : NaN;
-      if (Number.isFinite(lastMs) && now.getTime() < lastMs + hours * 3600 * 1000 + ROLL_MARGIN_MS) return;
-      jobs.push({ key, idem: `${key}:${last ?? "init"}` });
+    // 对齐型:按**绝对周期**排,起跑时刻固定在「格子边界 + 余量」,而不是从上一轮往后推。
+    //
+    // 地图首领的刷新就是绝对周期(服务端自报「地图首领每 2 小时刷新」),所以起跑时刻该
+    // 对齐到刷新格子。早先用的是滚动排程(上一轮 + 2 小时 + 3 分钟余量):每轮多漂 3 分钟,
+    // 相位绕 2 小时格子转一圈约 3.3 天 —— 转到贴着边界的那一轮就撞上"服务端还没刷完",
+    // 整轮白跑;离边界远的那几轮又白等。对齐之后每轮都稳定落在刷新之后。
+    //
+    // 余量由调用方给(地图首领用 MAP_REFRESH_MARGIN_MS)。幂等键取格子序号,
+    // 所以一个格子里只会跑一轮,重启或手动 tick 都不会重复。
+    const aligned = (key, hours, marginMs) => {
+      const period = hours * 3600 * 1000;
+      jobs.push({ key, idem: `${key}:slot-${Math.floor((now.getTime() - marginMs) / period)}` });
     };
 
     if (rules.collect?.enabled) {
@@ -186,8 +189,8 @@ export class Scheduler {
       jobs.push({ key: "guild", idem: `guild:${slot(rules.guild.intervalHours)}` });
     }
     if (rules.boss?.enabled) {
-      // 地图首领不受每日次数限制,只受刷新时间限制(服务端自报),所以按滚动排
-      rolling("boss.map", rules.boss.mapIntervalHours);
+      // 地图首领不受每日次数限制,只受刷新时间限制(服务端自报),所以按刷新格子对齐排
+      aligned("boss.map", rules.boss.mapIntervalHours, MAP_REFRESH_MARGIN_MS);
       // 个人首领要显式开 challengePersonal 才排程:每日免费次数有限,
       // 用完服务端就自动扣门票,不该默认自动消耗。
       // 免费次数按北京时间每日重置,所以按"每天到点打一次"排,幂等键取当天日期。
@@ -208,6 +211,9 @@ export class Scheduler {
   // 某任务上一轮的起跑时刻。取"任意结果"的最近一轮(含 error 与空转)——
   // 只认成功会让一次报错把该任务永久卡住:键不变,到期判断也不前进。
   // started_at 是定长 UTC ISO,字典序即时间序,可直接排序取首行。
+  //
+  // 现在排程本身不再用它(地图首领改对齐排程后,没有任务依赖"上一轮什么时候跑的"),
+  // 但保留着 —— 排查时想按任务看最近一轮很方便,删了反而要现写 SQL。
   #lastRunAt(accountId, jobKey) {
     const row = this.db
       .prepare(`SELECT started_at FROM job_runs WHERE account_id=? AND job_key=? ORDER BY started_at DESC LIMIT 1`)

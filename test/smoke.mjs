@@ -805,64 +805,55 @@ check("状态汇总", st.idle?.validSeconds === 39600 && st.bosses === 7, JSON.s
 
 // ---- 排程触发时机 ----
 // plannedJobs 只决定"这一 tick 要不要排",真正的去重交给 job_runs 的唯一约束。
-// 第四个参数就是"上一轮起跑时刻"的注入点,所以这里不必碰私有 #lastRunAt,也不必等真实时间。
-// 地图首领是唯一改成滚动型的任务:绝对时间片的片界固定(2 小时片落在偶数点整)、
-// 与游戏的刷新周期同频,每轮都贴着刷新边界发起,实测约一半轮次整轮被服务端拦掉。
+//
+// 地图首领按**刷新格子对齐**排:服务端自报「地图首领每 2 小时刷新」,边界是绝对周期
+// (与北京时间的偶数点重合),起跑时刻固定取"边界 + 3 分钟余量"。
+// 早先是滚动排程(上一轮 + 2 小时 3 分钟):每轮多漂 3 分钟,相位绕 2 小时格子转一圈
+// 约 3.3 天 —— 转到贴着边界的那一轮就撞上"服务端还没刷完",整轮白跑。
 const planRules = {
   collect: { enabled: true, intervalHours: 2 },
   boss: { enabled: true, mapIntervalHours: 2, challengePersonal: false, worldWindows: [] }
 };
-const planAt = (iso, last = {}) => {
+const planAt = (iso) => {
   const now = new Date(iso);
-  return scheduler.plannedJobs(planRules, zonedParts(now, config.timezone), now, (k) => last[k] ?? null);
+  return scheduler.plannedJobs(planRules, zonedParts(now, config.timezone), now);
 };
-const planKeys = (iso, last) => planAt(iso, last).map((j) => j.key);
-const planIdem = (iso, key, last) => planAt(iso, last).find((j) => j.key === key)?.idem ?? null;
+const planIdem = (iso, key) => planAt(iso).find((j) => j.key === key)?.idem ?? null;
+const mapKey = (iso) => planIdem(iso, "boss.map");
 
-const LAST_MAP = "2026-08-31T02:00:00.000Z";
+// 2026-08-31 的 2 小时格子边界落在偶数点(UTC 与北京同奇偶)。
+// 04:00 那一刻还差余量,仍属上一格;04:03 才进入 04:00 这一格。
 check(
-  "地图首领没跑过就立刻排",
-  planKeys("2026-08-31T02:00:00.000Z").includes("boss.map") &&
-    planIdem("2026-08-31T02:00:00.000Z", "boss.map") === "boss.map:init",
-  JSON.stringify(planAt("2026-08-31T02:00:00.000Z"))
+  "刷新边界那一刻仍算上一格(余量没到)",
+  mapKey("2026-08-31T04:00:00.000Z") === mapKey("2026-08-31T02:03:00.000Z"),
+  `${mapKey("2026-08-31T04:00:00.000Z")} vs ${mapKey("2026-08-31T02:03:00.000Z")}`
 );
 check(
-  "刚跑过就不排",
-  !planKeys("2026-08-31T02:30:00.000Z", { "boss.map": LAST_MAP }).includes("boss.map"),
-  JSON.stringify(planAt("2026-08-31T02:30:00.000Z", { "boss.map": LAST_MAP }))
+  "边界 + 余量才换新格子(刷新后 3 分钟起跑)",
+  mapKey("2026-08-31T04:02:59.000Z") !== mapKey("2026-08-31T04:03:00.000Z") &&
+    mapKey("2026-08-31T04:03:00.000Z") !== mapKey("2026-08-31T02:03:00.000Z"),
+  `${mapKey("2026-08-31T04:02:59.000Z")} / ${mapKey("2026-08-31T04:03:00.000Z")}`
 );
-// 核心一条:整 2 小时到了但余量没满就是不排。老方案恰恰在这个时刻发起,
-// 而一轮里首领是依次打的、发起时刻本身还带 tick 抖动,于是整轮贴边被拦。
+// 同一个格子里键不变 —— 一个刷新周期只跑一轮,重启/手动 tick 都不会重复。
+// 这正是"对齐"相对"滚动"的关键:滚动型每轮键都变,所以没有这个约束。
 check(
-  "满 2 小时但没满 3 分钟余量,仍然不排",
-  !planKeys("2026-08-31T04:00:00.000Z", { "boss.map": LAST_MAP }).includes("boss.map") &&
-    !planKeys("2026-08-31T04:02:59.000Z", { "boss.map": LAST_MAP }).includes("boss.map"),
-  JSON.stringify(planAt("2026-08-31T04:00:00.000Z", { "boss.map": LAST_MAP }))
-);
-check(
-  "凑够 2 小时 3 分就排,幂等键取上一轮时刻",
-  planIdem("2026-08-31T04:03:00.000Z", "boss.map", { "boss.map": LAST_MAP }) === `boss.map:${LAST_MAP}`,
-  JSON.stringify(planAt("2026-08-31T04:03:00.000Z", { "boss.map": LAST_MAP }))
+  "同一格子里键稳定不变",
+  mapKey("2026-08-31T04:03:00.000Z") === mapKey("2026-08-31T05:59:59.000Z"),
+  `${mapKey("2026-08-31T04:03:00.000Z")} vs ${mapKey("2026-08-31T05:59:59.000Z")}`
 );
 // job_runs 的唯一约束是 (account_id, idempotency_key),不含 job_key ——
 // 幂等键不自带任务前缀,不同任务就会互相顶掉。
 check(
   "幂等键都自带任务前缀",
-  planAt("2026-08-31T04:03:00.000Z", { "boss.map": LAST_MAP }).every((j) => j.idem.startsWith(`${j.key}:`)),
-  JSON.stringify(planAt("2026-08-31T04:03:00.000Z", { "boss.map": LAST_MAP }))
+  planAt("2026-08-31T04:03:00.000Z").every((j) => j.idem.startsWith(`${j.key}:`)),
+  JSON.stringify(planAt("2026-08-31T04:03:00.000Z"))
 );
-// 上一轮时刻只喂给滚动型任务,interval 型的键仍是绝对时间片编号
+// interval 型任务的键仍是绝对时间片编号,没被地图首领的改动带偏
 check(
-  "interval 型任务不受滚动改动影响",
-  planIdem("2026-08-31T04:03:00.000Z", "collect", { "boss.map": LAST_MAP, collect: LAST_MAP }) ===
+  "interval 型任务不受地图首领改动影响",
+  planIdem("2026-08-31T04:03:00.000Z", "collect") ===
     `collect:${Math.floor(Date.parse("2026-08-31T04:03:00.000Z") / (2 * 3600 * 1000))}`,
-  JSON.stringify(planAt("2026-08-31T04:03:00.000Z", { collect: LAST_MAP }))
-);
-// 落库时刻坏掉(手工改库/时钟回拨写进脏值)就当没跑过照常排,而不是永久卡住
-check(
-  "上一轮时刻不可解析时按没跑过处理",
-  planIdem("2026-08-31T04:03:00.000Z", "boss.map", { "boss.map": "坏值" }) === "boss.map:坏值",
-  JSON.stringify(planAt("2026-08-31T04:03:00.000Z", { "boss.map": "坏值" }))
+  String(planIdem("2026-08-31T04:03:00.000Z", "collect"))
 );
 
 // 个人首领按"每天到点打一次"排,不再按间隔切绝对时间片:免费次数是北京时间每日重置的,
