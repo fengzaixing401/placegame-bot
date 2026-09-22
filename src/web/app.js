@@ -718,17 +718,16 @@ function panelGuild(r, opts) {
     hint: donateHint,
     addText: "添加捐献物品"
   });
-  // 兑换有周上限,带出来 —— 换不动了得知道是"没贡献值"还是"这周换满了"
-  const weekly = g.weeklyRedemption;
-  const weeklyText =
-    weekly && typeof weekly.remaining === "number" ? `。本周还能兑换 ${weekly.remaining}/${weekly.limit} 次` : "";
+  // 兑换**没有次数限制** —— 实测 storage 行一个限购字段都没有,只花贡献值,上限就是仓库库存。
+  // 限购在「公会补给」那一套上(supplies 行带 dailyPurchase*,另有一个 weeklySupplyRedemption),
+  // 本程序没实现补给,所以别把它的限制挂到这里来。
   const redeem = fRows("兑换", r.guild?.redeem ?? [], (init) => itemRow(init, {
     placeholder: "仓库物品 key",
     items: stock,
     amountWord: "库存",
     missingWord: "不在公会仓库"
   }), {
-    hint: "从公会仓库兑换,消耗贡献值。数量按游戏里的兑换次数算" + weeklyText,
+    hint: "从公会仓库兑换,只消耗贡献值、没有次数限制;上限是仓库库存(数量列显示的就是库存)",
     addText: "添加兑换物品"
   });
   const payload = () => ({

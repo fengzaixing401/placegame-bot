@@ -31,14 +31,20 @@ export async function redeemableItems(api) {
     equipmentDonationMinQuality: guild?.equipmentDonationMinQuality ?? null,
     canDonate: guild?.canDonate !== false,
     donationBlockedReason: (guild?.donationBlockedReason ?? "").trim() || null,
-    // 兑换有周上限(实测 {key:"2026-09-21", limit:30, redeemed:30, remaining:0}),
-    // 带出去让面板能显示"这周还能换几次" —— 不然换不动了也不知道为什么。
-    weeklyRedemption: guild?.weeklySupplyRedemption ?? null,
     // 可领的贡献奖励档位。**只带档位序号,不带整份 guild view** ——
     // 那份里有 89 个成员和 200 件装备仓库,塞进 options 会把它顶爆。
     claimableProgressPoints: claimableProgressPoints(guild)
   };
 }
+
+// 兑换**没有次数限制**,只花贡献值,上限是仓库库存本身。
+// 实测 storage 行只有 amount/bindStatus/guildId/itemKey/itemType/name/quality/supplyAmount,
+// **一个限购字段都没有** —— 别再往兑换提示里挂"本周还能换几次"。
+//
+// 限购在**另一套东西**上:公会补给(/api/guild/supply/purchase)的 supplies 行带
+// dailyPurchaseCount / dailyPurchaseLimit / dailyPurchaseRemaining(实测 5 项里 3 项当日已满),
+// 另外 guild.view 里还有一个 weeklySupplyRedemption 的周上限 —— 那都是**补给**,不是兑换。
+// 本程序没实现补给,所以这两处的限制都不该出现在兑换面板上。
 
 // 可领的贡献奖励档位。服务端的 progressRewards 每档自带 canClaim(实测四档:
 // 30/60/90/120 点,各带 rewardLabels 与 unlocked),**按它领**。
@@ -77,8 +83,7 @@ export async function viewForOptions(api) {
       equipmentDonationMinQuality: stock?.equipmentDonationMinQuality ?? null,
       canDonate: stock?.canDonate !== false,
       donationBlockedReason: stock?.donationBlockedReason ?? null,
-      // 兑换周上限与可领的贡献奖励档位 —— 面板要显示"这周还能换几次 / 有几档能领"
-      weeklyRedemption: stock?.weeklyRedemption ?? null,
+      // 可领的贡献奖励档位 —— 面板要显示"有几档能领"。兑换没有次数限制,所以不带任何上限字段
       claimableProgressPoints: Array.isArray(stock?.claimableProgressPoints) ? stock.claimableProgressPoints : []
     },
     errors: [bag?.error, stock?.error].filter(Boolean)

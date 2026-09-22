@@ -1165,10 +1165,13 @@ check(
   JSON.stringify(optionsOut.guild.claimableProgressPoints) === "[90,120]",
   JSON.stringify(optionsOut.guild.claimableProgressPoints)
 );
+// 兑换**没有次数限制**,只花贡献值,上限是仓库库存本身 —— 实测 storage 行一个限购字段都没有。
+// 踩过:把「公会补给」那套的 weeklySupplyRedemption 错当成兑换的周上限显示在面板上。
+// 这条断言钉的是"不该有":假 guild.view 里带着 weeklySupplyRedemption,但它不许漏进 options。
 check(
-  "选项带出兑换周上限",
-  optionsOut.guild.weeklyRedemption?.remaining === 18 && optionsOut.guild.weeklyRedemption?.limit === 30,
-  JSON.stringify(optionsOut.guild.weeklyRedemption)
+  "兑换不带任何次数上限(限购是补给那套的事)",
+  !("weeklyRedemption" in (optionsOut.guild ?? {})),
+  JSON.stringify(optionsOut.guild)
 );
 check("活跃宝箱有可领档位", optionsOut.activity?.claimable?.length === 1, JSON.stringify(optionsOut.activity));
 check("挂机概览透传 idlePreview", optionsOut.idle?.validSeconds === 39600, JSON.stringify(optionsOut.idle));

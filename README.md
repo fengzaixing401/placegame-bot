@@ -427,8 +427,15 @@ WebUI 的等级输入框上限也跟着硬上限走，常量由后端随背包�
 不是自己背包的持有数。装备捐献另有品质下限，那是公会自己的设置（服务端
 `equipmentDonationMinQuality`），面板照它显示，本程序不代为放宽。
 
-**兑换有周上限**（服务端 `weeklySupplyRedemption`，实测 `{limit:30, redeemed:30, remaining:0}`）——
-面板上会写「本周还能兑换 N/M 次」，换不动时一眼能分清是没贡献值还是这周换满了。
+**兑换没有次数限制** —— 只花贡献值，上限就是公会仓库的库存本身（实测 `storage` 行只有
+`amount / bindStatus / guildId / itemKey / itemType / name / quality / supplyAmount`，
+**一个限购字段都没有**）。面板上「数量」那列显示的就是仓库库存。
+
+限购在**另一套东西**上：**公会补给**（`/api/guild/supply/purchase`）的 `supplies` 行带
+`dailyPurchaseCount / dailyPurchaseLimit / dailyPurchaseRemaining`（实测 5 项里 3 项当日已满），
+另外 `guild.view` 里还有一个 `weeklySupplyRedemption` 的周上限 —— **那都是补给，不是兑换**。
+本程序没实现补给，所以这些限制不该出现在兑换面板上（踩过：把 `weeklySupplyRedemption`
+错当成兑换的周上限显示，实际兑换根本没这个限制）。
 
 ### 贡献奖励（游戏里叫「进度奖励」）
 
