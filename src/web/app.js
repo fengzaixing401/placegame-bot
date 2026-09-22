@@ -699,6 +699,15 @@ function panelGuild(r, opts) {
   const stock = opts?.redeemableItems ?? [];
   const g = opts?.guild ?? {};
   const dividend = fBool("领公会分红", r.guild?.claimDividend, "游戏要求当日先完成捐献才能领");
+  // 贡献奖励(游戏里叫「进度奖励」):档位随贡献点解锁,所以不给档位输入框,
+  // 直接按服务端给的 canClaim 领 —— 写死一串序号迟早追不上。
+  const claimable = Array.isArray(g.claimableProgressPoints) ? g.claimableProgressPoints : [];
+  const progress = fBool(
+    "领贡献奖励",
+    r.guild?.claimProgressRewards,
+    "按游戏给的「可领」状态自动领,不用点名档位(实测四档:30 / 60 / 90 / 120 点)" +
+      (claimable.length ? `。现在有 ${claimable.length} 档可领:${claimable.join(" / ")} 点` : "。现在没有可领的档位")
+  );
   const donateHint = g.canDonate === false
     ? `现在捐不了:${g.donationBlockedReason ?? "游戏未说明原因"}`
     : "按物品选,运行时自动换成背包里的实例 ID" +
@@ -709,18 +718,27 @@ function panelGuild(r, opts) {
     hint: donateHint,
     addText: "添加捐献物品"
   });
+  // 兑换有周上限,带出来 —— 换不动了得知道是"没贡献值"还是"这周换满了"
+  const weekly = g.weeklyRedemption;
+  const weeklyText =
+    weekly && typeof weekly.remaining === "number" ? `。本周还能兑换 ${weekly.remaining}/${weekly.limit} 次` : "";
   const redeem = fRows("兑换", r.guild?.redeem ?? [], (init) => itemRow(init, {
     placeholder: "仓库物品 key",
     items: stock,
     amountWord: "库存",
     missingWord: "不在公会仓库"
   }), {
-    hint: "从公会仓库兑换,消耗贡献值。数量按游戏里的兑换次数算",
+    hint: "从公会仓库兑换,消耗贡献值。数量按游戏里的兑换次数算" + weeklyText,
     addText: "添加兑换物品"
   });
-  const payload = () => ({ claimDividend: dividend.read(), donate: donate.read(), redeem: redeem.read() });
+  const payload = () => ({
+    claimDividend: dividend.read(),
+    claimProgressRewards: progress.read(),
+    donate: donate.read(),
+    redeem: redeem.read()
+  });
   return {
-    node: el("div", { className: "op-form" }, dividend.node, donate.node, redeem.node),
+    node: el("div", { className: "op-form" }, dividend.node, progress.node, donate.node, redeem.node),
     read: payload,
     toRules: () => ({ guild: payload() })
   };

@@ -30,8 +30,23 @@ export async function redeemableItems(api) {
       .filter((r) => r.itemKey),
     equipmentDonationMinQuality: guild?.equipmentDonationMinQuality ?? null,
     canDonate: guild?.canDonate !== false,
-    donationBlockedReason: (guild?.donationBlockedReason ?? "").trim() || null
+    donationBlockedReason: (guild?.donationBlockedReason ?? "").trim() || null,
+    // 兑换有周上限(实测 {key:"2026-09-21", limit:30, redeemed:30, remaining:0}),
+    // 带出去让面板能显示"这周还能换几次" —— 不然换不动了也不知道为什么。
+    weeklyRedemption: guild?.weeklySupplyRedemption ?? null,
+    // 可领的贡献奖励档位。**只带档位序号,不带整份 guild view** ——
+    // 那份里有 89 个成员和 200 件装备仓库,塞进 options 会把它顶爆。
+    claimableProgressPoints: claimableProgressPoints(guild)
   };
+}
+
+// 可领的贡献奖励档位。服务端的 progressRewards 每档自带 canClaim(实测四档:
+// 30/60/90/120 点,各带 rewardLabels 与 unlocked),**按它领**。
+// 早先只能让规则里写死一串档位序号 —— 档位随贡献点解锁,写死就永远追不上,
+// 而且面板里根本没这个字段,等于配不了。
+export function claimableProgressPoints(guild) {
+  const rows = Array.isArray(guild?.progressRewards) ? guild.progressRewards : [];
+  return rows.filter((r) => r?.canClaim === true && Number.isInteger(r?.point)).map((r) => r.point);
 }
 
 // 可捐献物品清单,同时供 WebUI 下拉渲染。amount 是当前持有数量。
@@ -61,7 +76,10 @@ export async function viewForOptions(api) {
     guild: {
       equipmentDonationMinQuality: stock?.equipmentDonationMinQuality ?? null,
       canDonate: stock?.canDonate !== false,
-      donationBlockedReason: stock?.donationBlockedReason ?? null
+      donationBlockedReason: stock?.donationBlockedReason ?? null,
+      // 兑换周上限与可领的贡献奖励档位 —— 面板要显示"这周还能换几次 / 有几档能领"
+      weeklyRedemption: stock?.weeklyRedemption ?? null,
+      claimableProgressPoints: Array.isArray(stock?.claimableProgressPoints) ? stock.claimableProgressPoints : []
     },
     errors: [bag?.error, stock?.error].filter(Boolean)
   };
@@ -69,7 +87,17 @@ export async function viewForOptions(api) {
 
 // ④ 公会兑换 + 捐献 + 分红。
 // 注意接口不对称(CLI 已确认,勿"统一"):redeem 用 itemKey,donate 用 itemId。
-export async function dailyRoutine(api, { redeem = [], donate = [], equipmentDonate = [], claimDividend = true, claimProgressPoints = [] } = {}) {
+export async function dailyRoutine(
+  api,
+  {
+    redeem = [],
+    donate = [],
+    equipmentDonate = [],
+    claimDividend = true,
+    claimProgressRewards = true,
+    claimProgressPoints = []
+  } = {}
+) {
   const out = { redeemed: [], donated: [], equipmentDonated: [], dividend: null, progress: [], errors: [] };
 
   // 中文名解析器。日志里只有 itemKey 就会渲出 skill_page 这种裸键,
@@ -158,7 +186,18 @@ export async function dailyRoutine(api, { redeem = [], donate = [], equipmentDon
     }
   }
 
-  for (const point of claimProgressPoints) {
+  // 贡献奖励(游戏里叫"进度奖励"):默认按服务端给的 canClaim 领 ——
+  // 档位随贡献点解锁,规则里写死一串序号迟早追不上,而且原先面板里根本没这个字段。
+  // 显式的 claimProgressPoints 仍然认(老调用方),两者合并去重。
+  let points = [...claimProgressPoints];
+  if (claimProgressRewards) {
+    try {
+      points = [...new Set([...points, ...claimableProgressPoints(await view(api))])];
+    } catch (err) {
+      out.errors.push({ step: "claimProgress", error: `读取贡献奖励档位失败:${err.message}` });
+    }
+  }
+  for (const point of points) {
     try {
       out.progress.push({ point, result: await claimProgress(api, point) });
     } catch (err) {

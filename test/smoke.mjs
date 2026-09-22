@@ -188,9 +188,21 @@ function fakeFetch(url, opts = {}) {
           ],
           equipmentDonationMinQuality: "blue",
           canDonate: true,
-          donationBlockedReason: ""
+          donationBlockedReason: "",
+          // 真号形状:四档贡献奖励,每档自带 canClaim(30/60/90/120 点)。
+          // 前两档已领、后两档可领 —— 用来验"按 canClaim 领,不按写死的档位序号"。
+          progressRewards: [
+            { point: 30, current: 250, canClaim: false, claimed: true, unlocked: true, rewardLabels: ["金币 1000"] },
+            { point: 60, current: 250, canClaim: false, claimed: true, unlocked: true, rewardLabels: ["技能残页 x5"] },
+            { point: 90, current: 250, canClaim: true, claimed: false, unlocked: true, rewardLabels: ["元宝碎片 x30"] },
+            { point: 120, current: 250, canClaim: true, claimed: false, unlocked: true, rewardLabels: ["金币 3000", "首领门票 x1"] }
+          ],
+          // 兑换有周上限,真号形状
+          weeklySupplyRedemption: { key: "2026-09-01", limit: 30, redeemed: 12, remaining: 18 }
         }
       });
+    case "/api/guild/claim-progress":
+      return reply({ point: body.point, claimed: true });
     case "/api/inventory/list":
       return reply({
         equipment: [],
@@ -545,6 +557,27 @@ const g = await service.run("fzx401", (api, row) => actions.guild(api, row));
 check("公会 redeem 用 itemKey", g.redeemed[0]?.result?.redeemed === "k1");
 check("公会 donate 用 itemId", g.donated[0]?.result?.donated === "i1");
 check("公会分红", g.dividend?.dividend === 500);
+// 贡献奖励(游戏里叫「进度奖励」):按服务端的 canClaim 领,不按写死的档位序号。
+// 原先只能让规则里写死一串整数档位,而面板里根本没这个字段 —— 等于配不了。
+// 实测真号四档:30/60/90/120 点,每档自带 canClaim / claimed / rewardLabels。
+check(
+  "按 canClaim 领贡献奖励,不碰已领的档位",
+  g.progress.length === 2 &&
+    g.progress.map((x) => x.point).sort((a, b) => a - b).join(",") === "90,120" &&
+    g.progress[0].result?.claimed === true,
+  JSON.stringify(g.progress)
+);
+check(
+  "关掉开关就一档都不领",
+  (await service.run("fzx401", (api, row) => actions.guild(api, row, { claimProgressRewards: false }))).progress.length === 0
+);
+check(
+  "显式档位列表仍然认,与自动检测合并去重",
+  (await service.run("fzx401", (api, row) => actions.guild(api, row, { claimProgressPoints: [30] })))
+    .progress.map((x) => x.point)
+    .sort((a, b) => a - b)
+    .join(",") === "30,90,120"
+);
 
 const bm = await service.run("fzx401", (api, row) => actions["boss.map"](api, row));
 const bmSkip = (key) => bm.skipped.find((s) => s.bossKey === key);
@@ -1126,6 +1159,17 @@ check(
   JSON.stringify({ donate: optionsOut.donatableItems, redeem: optionsOut.redeemableItems })
 );
 check("公会品质下限照抄服务端", optionsOut.guild.equipmentDonationMinQuality === "blue", JSON.stringify(optionsOut.guild));
+// 面板要显示"有几档贡献奖励能领 / 这周还能兑换几次",数据必须从 options 带出来
+check(
+  "选项带出可领的贡献奖励档位",
+  JSON.stringify(optionsOut.guild.claimableProgressPoints) === "[90,120]",
+  JSON.stringify(optionsOut.guild.claimableProgressPoints)
+);
+check(
+  "选项带出兑换周上限",
+  optionsOut.guild.weeklyRedemption?.remaining === 18 && optionsOut.guild.weeklyRedemption?.limit === 30,
+  JSON.stringify(optionsOut.guild.weeklyRedemption)
+);
 check("活跃宝箱有可领档位", optionsOut.activity?.claimable?.length === 1, JSON.stringify(optionsOut.activity));
 check("挂机概览透传 idlePreview", optionsOut.idle?.validSeconds === 39600, JSON.stringify(optionsOut.idle));
 

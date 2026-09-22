@@ -49,6 +49,9 @@ const DEFAULTS = {
       // 所以规则里存稳定的 itemKey,运行时再查背包换成 itemId
       donate: [],
       claimDividend: true,
+      // 贡献奖励(游戏里叫「进度奖励」)。**默认按服务端的 canClaim 领,不用点名档位** ——
+      // 档位随贡献点解锁,写死一串序号迟早追不上。实测四档:30/60/90/120 点。
+      claimProgressRewards: true,
       intervalHours: 20
     },
     boss: {

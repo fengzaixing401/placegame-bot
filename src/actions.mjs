@@ -55,6 +55,7 @@ export function buildActions(config) {
         donate: args?.donate ?? r.donate,
         equipmentDonate: args?.equipmentDonate ?? r.equipmentDonate ?? [],
         claimDividend: args?.claimDividend ?? r.claimDividend,
+        claimProgressRewards: args?.claimProgressRewards ?? r.claimProgressRewards ?? true,
         claimProgressPoints: args?.claimProgressPoints ?? r.claimProgressPoints ?? []
       });
     },

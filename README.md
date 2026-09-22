@@ -108,7 +108,7 @@ agent 用 `authorization: Bearer <令牌>`，浏览器用 WebUI 登录后的会�
 | POST | `/accounts/:id/collect` | ① 收挂机收益（自动处理冒险选项） |
 | POST | `/accounts/:id/inventory/decompose` | ② 背包一键分解 |
 | POST | `/accounts/:id/profession/settle` | ③ 副职结算 + 排任务 |
-| POST | `/accounts/:id/guild/daily` | ④ 公会兑换 + 捐献 + 分红 |
+| POST | `/accounts/:id/guild/daily` | ④ 公会兑换 + 捐献 + 分红 + 贡献奖励 |
 | POST | `/accounts/:id/boss/map` | ⑤ 地图首领 |
 | POST | `/accounts/:id/boss/personal` | ⑤ 个人首领（名单为空则一个都不打） |
 | POST | `/accounts/:id/boss/world` | ⑤ 世界首领协作（窗口外自动跳过） |
@@ -426,6 +426,19 @@ WebUI 的等级输入框上限也跟着硬上限走，常量由后端随背包�
 页面两处都是下拉，选项带中文名与品质；兑换那侧显示的数量是**公会仓库库存**，
 不是自己背包的持有数。装备捐献另有品质下限，那是公会自己的设置（服务端
 `equipmentDonationMinQuality`），面板照它显示，本程序不代为放宽。
+
+**兑换有周上限**（服务端 `weeklySupplyRedemption`，实测 `{limit:30, redeemed:30, remaining:0}`）——
+面板上会写「本周还能兑换 N/M 次」，换不动时一眼能分清是没贡献值还是这周换满了。
+
+### 贡献奖励（游戏里叫「进度奖励」）
+
+服务端 `progressRewards` 是四档（实测 30 / 60 / 90 / 120 贡献点），**每档自带 `canClaim` /
+`claimed` / `unlocked` / `rewardLabels`**，所以规则里只需要一个开关 `guild.claimProgressRewards`
+（默认开），**不用点名档位** —— 档位随贡献点解锁，写死一串序号迟早追不上。
+
+早先这里只能让规则写死 `claimProgressPoints: [30,60,...]`，而**面板里根本没有这个字段**，
+等于配不了。现在显式列表仍然认（老调用方），与自动检测的结果合并去重。
+面板上会显示「现在有几档可领」以及是哪几档。
 
 游戏里还有一套「公会补给」（`/api/guild/supply/purchase`，收的是 `supplyKey`，
 另有每日限购与公会等级门槛）—— **本程序没有实现**，所以那些 key 填进兑换里不会生效。
