@@ -55,9 +55,9 @@ let equipmentHardRows = true;
 // 循环协作就是靠它驱动的 —— 假响应少了这段,循环会走"读不到次数就停手",
 // 于是"每个首领只协作一次"的老 bug 在测试里照样全绿。
 // frozen: 服务端不把这次算进去(remainingAttemptCount 不往下走),用来测空转停手。
-let assistState = { my: 0, max: 3, status: "active", frozen: false };
+let assistState = { my: 0, max: 3, status: "active", frozen: false, failOnce: {} };
 const resetAssist = (over = {}) => {
-  assistState = { my: 0, max: 3, status: "active", frozen: false, ...over };
+  assistState = { my: 0, max: 3, status: "active", frozen: false, failOnce: {}, ...over };
 };
 
 // 难度档。真号每个首领都带 difficultyOptions 三档,门票消耗按类型分野:
@@ -271,6 +271,13 @@ function fakeFetch(url, opts = {}) {
       });
     // 真号形状:顶层 damage,场次进度在 worldBoss 段。没有 cost 字段 —— 协作不扣门票。
     case "/api/boss/assist": {
+      // 抖动注入:failOnce[key] 还有余额时直接返 502(可重试的瞬时故障),
+      // 用来验"主循环连续失败的首领,整轮末尾补跑能不能救回来"。
+      const flaky = assistState.failOnce?.[body.bossKey] ?? 0;
+      if (flaky > 0) {
+        assistState.failOnce[body.bossKey] = flaky - 1;
+        return reply({ error: "请求超时。" }, 502);
+      }
       if (!assistState.frozen) assistState.my += 1;
       const left = Math.max(0, assistState.max - assistState.my);
       return reply({
@@ -717,6 +724,33 @@ check(
   "剩余次数不推进就停手,不空转",
   wbFrozen.assisted.length === 2 && wbFrozen.errors.length === 0,
   JSON.stringify({ assisted: wbFrozen.assisted.length, errors: wbFrozen.errors })
+);
+resetAssist();
+
+// 补跑:主循环里连续 3 次都撞上抖动的首领,整轮末尾再给一次机会。
+// 实测 2026-09-22 游戏把世界首领从 8 个加到 14 个后,每轮稳定出现约 4 条「请求超时」
+// (加之前是 0 条),而同一个首领在别的窗口常常协作成功 —— 是瞬时抖动,不是打不了。
+// 当轮直接放弃等于白丢一次协作。
+resetAssist({ failOnce: { boss_w: 3 } }); // 主循环 retries:2 => 3 次尝试全失败,补跑那次成功
+const callsBeforeRetry = calls.length;
+const wbRetry = await service.run("fzx401", (api, row) => actions["boss.world"](api, row));
+const retryAssists = calls.slice(callsBeforeRetry).filter((c) => c.path === "/api/boss/assist").length;
+check(
+  "主循环失败的首领在整轮末尾补跑一次",
+  wbRetry.assisted.some((a) => a.bossKey === "boss_w"),
+  JSON.stringify({ assisted: wbRetry.assisted.map((a) => a.bossKey), errors: wbRetry.errors })
+);
+check("补成功后撤回先前那条超时记录", wbRetry.errors.length === 0, JSON.stringify(wbRetry.errors));
+check("补跑确实多发了请求", retryAssists > 3, `assist 调用 ${retryAssists} 次`);
+resetAssist();
+
+// 补跑也失败时:原来那条错误必须留着 —— 否则日志会显示"这一轮没问题",而首领其实没协作上
+resetAssist({ failOnce: { boss_w: 99 } });
+const wbRetryFail = await service.run("fzx401", (api, row) => actions["boss.world"](api, row));
+check(
+  "补跑也失败时保留错误记录",
+  wbRetryFail.assisted.length === 0 && wbRetryFail.errors.length > 0,
+  JSON.stringify({ assisted: wbRetryFail.assisted.length, errors: wbRetryFail.errors.length })
 );
 resetAssist();
 

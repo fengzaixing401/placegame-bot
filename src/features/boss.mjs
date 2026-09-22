@@ -214,9 +214,11 @@ export async function challenge(api, bossKey, rules) {
 
 // 协作不扣门票也不扣挑战次数(响应里没有 cost 字段),重发最坏只是多提交一次伤害,
 // 所以这里显式开退避重试 —— 场次只开一小时,超时丢掉就等下一场了。
-export async function assist(api, bossKey) {
+export async function assist(api, bossKey, { retries = 2 } = {}) {
   if (!bossKey) throw new Error("assist 需要 bossKey");
-  return api.post("/api/boss/assist", { bossKey }, { retries: 2 });
+  // 协作不扣门票也不扣次数(只有成功的协作才推进场次进度),所以重发安全 ——
+  // 这也是全项目唯一默认带重试的 POST。补跑那一轮会传更小的 retries。
+  return api.post("/api/boss/assist", { bossKey }, { retries });
 }
 
 export async function claimReward(api) {
@@ -617,15 +619,19 @@ export async function runBosses(api, { types, rules = {}, maxChallenges = 5, dry
 //   ② 响应里读不到 worldBoss.remainingAttemptCount —— 不猜次数
 //   ③ 次数归零,或场次已不是 active(被全服打死 defeated / 时间到 ended)
 //   ④ 剩余次数没往下走 —— 服务端没把这次算进去,再发只是空转
-async function assistUntilExhausted(api, label, out) {
+//
+// 返回值:失败时返回那条错误记录(调用方拿它去重/撤回),成功或正常收手返回 null。
+// 补跑那一轮传 `record: false` —— 它不该再往 errors 里堆一条,失败时原来那条还在。
+async function assistUntilExhausted(api, label, out, { retries = 2, record = true } = {}) {
   let lastLeft = null;
   for (let round = 1; ; round += 1) {
     let result;
     try {
-      result = await assist(api, label.bossKey);
+      result = await assist(api, label.bossKey, { retries });
     } catch (err) {
-      out.errors.push({ ...label, round, error: err.message });
-      return;
+      const entry = { ...label, round, error: err.message };
+      if (record) out.errors.push(entry);
+      return entry;
     }
 
     // 判定与展示用的字段都记在浅层(assisted[i] 深度 2):
@@ -645,9 +651,9 @@ async function assistUntilExhausted(api, label, out) {
       status: inst?.status ?? null
     });
 
-    if (left === null || left <= 0) return;
-    if (inst.status && inst.status !== "active") return;
-    if (lastLeft !== null && left >= lastLeft) return;
+    if (left === null || left <= 0) return null;
+    if (inst.status && inst.status !== "active") return null;
+    if (lastLeft !== null && left >= lastLeft) return null;
     lastLeft = left;
   }
 }
@@ -670,6 +676,8 @@ export async function runWorldBoss(api, { rules = {} } = {}) {
   if (!bosses) return out;
 
   const wanted = asSet(rules.worldBosses);
+  // 主循环里失败的首领攒下来,整轮末尾补一次(见下)
+  const failed = [];
   for (const boss of bosses) {
     const key = pickKey(boss);
     // 名单为空表示"全部参与";点了名就只协作名单里那几个
@@ -682,8 +690,26 @@ export async function runWorldBoss(api, { rules = {} } = {}) {
       out.skipped.push({ ...label, reason, refreshText: boss.refreshText ?? null });
       continue;
     }
-    await assistUntilExhausted(api, label, out);
+    const err = await assistUntilExhausted(api, label, out);
+    if (err) failed.push({ label, err });
   }
+
+  // 补跑:主循环里连续 3 次都撞上抖动的首领,在整轮末尾再给一次机会。
+  //
+  // 为什么值得补:实测 2026-09-22 游戏把世界首领从 8 个加到 14 个之后,每轮稳定出现
+  // 约 4 条「请求超时」(加之前是 0 条),而**同一个首领在别的窗口常常协作成功** ——
+  // 说明是瞬时抖动,不是这个首领打不了。当轮直接放弃等于白丢一次协作。
+  // (单次 assist 实测只要 2-5 秒,远没到 15 秒超时,所以不是超时设短了。)
+  //
+  // 只补一轮、且每次只重试 1 次(主循环已经是 3 次尝试),免得一直抖一直重试把整轮拖长。
+  // 补成功后把先前那条错误记录**撤回** —— 它已经不是最终结果,留着会把日志带偏,
+  // 也会让 collectRealFailures 把这一轮误记成 partial。
+  const recovered = new Set();
+  for (const f of failed) {
+    const again = await assistUntilExhausted(api, f.label, out, { retries: 1, record: false });
+    if (!again) recovered.add(f.err);
+  }
+  if (recovered.size > 0) out.errors = out.errors.filter((e) => !recovered.has(e));
 
   // 一个都没协作成功就不必领奖,省一次请求
   if (out.assisted.length > 0) {
