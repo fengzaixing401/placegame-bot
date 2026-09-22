@@ -519,8 +519,17 @@ export async function runBosses(api, { types, rules = {}, maxChallenges = 5, dry
     ? expandPersonalBudget(selected, rules, out.gate.useTickets)
     : selected;
 
-  for (const boss of candidates) {
-    if (out.attempted.length >= maxChallenges) break;
+  // 上限截断要显式记一笔,**别静默 break**。实测 2026-09-22:游戏把地图首领从 14 个加到 26 个,
+  // 而默认上限还停在 14,当天 12 轮全是「打 14 跳 2」,新加的深渊熔炉领主 / 熔界终焉
+  // 一次都没轮到,面板上却看不出任何异常。截断不是故障(所以不进 errors、不影响任务状态),
+  // 但必须让人看见 —— 否则游戏每次加首领都会静默丢东西。
+  let cutAt = -1;
+  for (let i = 0; i < candidates.length; i += 1) {
+    if (out.attempted.length >= maxChallenges) {
+      cutAt = i;
+      break;
+    }
+    const boss = candidates[i];
 
     const key = pickKey(boss);
     const difficulty = difficultyFor(boss);
@@ -578,6 +587,15 @@ export async function runBosses(api, { types, rules = {}, maxChallenges = 5, dry
     } catch (err) {
       out.errors.push({ ...label, error: err.message });
     }
+  }
+
+  // 截断了就记一条 skip,日志里会以「(本轮上限截断) —— …」显示。
+  // 走 skipped 而不是 errors:截断是配置偏紧,不是故障,不该把任务染成 partial。
+  if (cutAt >= 0) {
+    skip({
+      name: "(本轮上限截断)",
+      reason: `本轮挑战数已达上限 ${maxChallenges},还有 ${candidates.length - cutAt} 个候选没轮到。调大上限,或把名单收窄`
+    });
   }
 
   if (!dryRun && out.attempted.length > 0) {

@@ -578,6 +578,21 @@ check(
   bmCap.attempted.length === 2,
   JSON.stringify(bmCap.attempted.map((x) => x.bossKey))
 );
+// 截断了必须显式记一笔 —— 游戏加首领而默认上限没跟上时,这是唯一能看见的信号。
+// 实测 2026-09-22:地图首领从 14 加到 26、默认上限还是 14,12 轮全是「打 14 跳 2」,
+// 新加的首领一次没轮到,面板上却毫无异常。
+check(
+  "上限截断会记一条 skip 而不是静默丢弃",
+  bmCap.skipped.some((s) => /上限截断/.test(s.name ?? "") && /没轮到/.test(s.reason ?? "")),
+  JSON.stringify(bmCap.skipped.map((s) => [s.name, s.reason]))
+);
+// 截断是"配置偏紧"不是故障:不该进 errors、不该把任务染成 partial
+check("截断不算故障", (bmCap.errors ?? []).length === 0, JSON.stringify(bmCap.errors));
+check(
+  "没截断时不记这条",
+  !bm.skipped.some((s) => /上限截断/.test(s.name ?? "")),
+  JSON.stringify(bm.skipped.map((s) => s.name))
+);
 // 反向:个人首领的次数键不该被地图那个键左右
 const bpCap = await service.run("fzx401", (api, row) =>
   actions["boss.personal"](api, row, { rules: { personalBosses: ["boss_pig"], personalMaxPerDay: 3, mapMaxPerRun: 1 } })

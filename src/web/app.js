@@ -907,11 +907,13 @@ function panelBossMap(r, opts) {
       "在世界首领面板是协作(只参与、没有难度)。两种玩法各走各的规则,互不影响",
     describe: (row) => bossRowHint(row, difficulty.read())
   });
-  // 地图首领自己的次数上限,与个人首领的「一天打几次」互不影响
+  // 地图首领自己的次数上限,与个人首领的「一天打几次」互不影响。
+  // 这个上限卡的是**真正发起挑战的次数**,不是候选个数 —— 被服务端拦下的不计入,
+  // 所以填小于"实际能打的个数"才会截掉后面几个。
   const maxRun = fNum("本次最多挑战几个", r.boss?.mapMaxPerRun, {
     min: 1,
     max: 50,
-    hint: `这一栏现在共 ${rows.length} 个,填小于它会静默截掉后面几个。与个人首领的次数是两个独立设置`,
+    hint: `这一栏现在共 ${rows.length} 个(其中一部分会被服务端按转生/等级拦下)。填小于实际能打的数量会静默截掉后面几个。与个人首领的次数是两个独立设置`,
     required: true
   });
   const gates = bossGates(r, {
