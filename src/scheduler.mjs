@@ -88,7 +88,8 @@ export function activeWindow(parts, windows) {
 // - aligned 型:用"边界 + 余量"折算出的格子序号,同一个刷新格子里只跑一次
 //   (地图首领 —— 服务端的刷新是绝对周期,起跑时刻要对齐到它)
 // - daily 型:用账号时区的日期
-// - window 型:用日期 + 窗口标识
+// - window 型:用日期 + 窗口标识 + 窗口内的第几轮(世界首领一个窗口跑两轮 ——
+//   协作额度不跨窗口,前半段没打上的后半段还有机会)
 export class Scheduler {
   constructor({ db, store, service, config, actions, logger = console }) {
     this.db = db;
@@ -200,7 +201,20 @@ export class Scheduler {
         jobs.push({ key: "boss.personal", idem: `boss.personal:${parts.date}` });
       }
       const win = activeWindow(parts, rules.boss.worldWindows);
-      if (win) jobs.push({ key: "boss.world", idem: `boss.world:${parts.date}:${win}` });
+      if (win) {
+        // 一个窗口跑两轮:前半段一轮、后半段再一轮(各 30 分钟)。
+        //
+        // 为什么:协作额度是"每场次 N 次",而**额度不跨窗口 —— 窗口一关就作废**。
+        // 一轮里某个首领连续撞上抖动就会被当轮放弃(assist 自带重试 2 次,再加末尾补跑一轮),
+        // 那些没打上的次数就只能白白丢掉。实测 2026-09-22 14:00 那轮:虚空吞星兽与霜烬天灾
+        // 第一次协作就超时,一次都没打上,额度一直留到 15:00 窗口关闭。
+        // 后半段再跑一轮,这些额度就能用掉。
+        //
+        // 后一轮绝大部分会被服务端判「本场次协作次数已用尽」直接跳过,成本很低 ——
+        // 一次 worldStatus + 一次首领名单 + 几个跳过,不发 assist。
+        const half = Math.floor((parts.minutes - toMinutes(String(win).split("-")[0])) / 30);
+        jobs.push({ key: "boss.world", idem: `boss.world:${parts.date}:${win}:${half}` });
+      }
     }
     if (rules.activity?.enabled && parts.minutes >= toMinutes(rules.activity.dailyAt)) {
       jobs.push({ key: "activity", idem: `activity:${parts.date}` });

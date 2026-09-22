@@ -905,6 +905,40 @@ check(
   String(planIdem("2026-08-31T04:03:00.000Z", "collect"))
 );
 
+// 世界首领一个窗口跑两轮(前半段/后半段各一轮)。
+// 协作额度是"每场次 N 次"且**不跨窗口 —— 窗口一关就作废**。一轮里某个首领连续撞上抖动
+// 就会被当轮放弃(assist 自带重试 2 次 + 末尾补跑一轮),那些没打上的次数就白丢了。
+// 实测 2026-09-22 14:00 那轮:虚空吞星兽与霜烬天灾第一次协作就超时,一次都没打上,
+// 额度一直留到 15:00 窗口关闭。后半段再跑一轮就能把这些额度用掉。
+const winRules = {
+  boss: { enabled: true, challengePersonal: false, worldWindows: [{ start: "10:00", end: "11:00" }] }
+};
+const winIdem = (iso) => {
+  const now = new Date(iso);
+  return (
+    scheduler
+      .plannedJobs(winRules, zonedParts(now, config.timezone), now)
+      .find((j) => j.key === "boss.world")?.idem ?? null
+  );
+};
+// 北京时间 10:00 = UTC 02:00
+check(
+  "窗口前半段排一轮",
+  winIdem("2026-09-01T02:00:30.000Z") === "boss.world:2026-09-01:10:00-11:00:0",
+  String(winIdem("2026-09-01T02:00:30.000Z"))
+);
+check(
+  "窗口后半段换新键(再跑一轮,捡回没打上的额度)",
+  winIdem("2026-09-01T02:29:59.000Z") === "boss.world:2026-09-01:10:00-11:00:0" &&
+    winIdem("2026-09-01T02:30:00.000Z") === "boss.world:2026-09-01:10:00-11:00:1",
+  `${winIdem("2026-09-01T02:29:59.000Z")} / ${winIdem("2026-09-01T02:30:00.000Z")}`
+);
+check(
+  "窗口外不排",
+  winIdem("2026-09-01T01:59:00.000Z") === null && winIdem("2026-09-01T03:00:00.000Z") === null,
+  `${winIdem("2026-09-01T01:59:00.000Z")} / ${winIdem("2026-09-01T03:00:00.000Z")}`
+);
+
 // 个人首领按"每天到点打一次"排,不再按间隔切绝对时间片:免费次数是北京时间每日重置的,
 // 24 小时片的片界落在 UTC 00:00(北京 08:00),与重置时刻错开。
 // personalAt 是北京时间,zonedParts 已按 Asia/Shanghai 折算,所以 09:00 = UTC 01:00。
