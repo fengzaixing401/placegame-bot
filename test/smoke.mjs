@@ -1230,6 +1230,26 @@ check(
   JSON.stringify(Object.keys(optionsOut).sort())
 );
 check("面板全通时 errors 为空", optionsOut.errors.length === 0, JSON.stringify(optionsOut.errors));
+
+// 面板上的每个动作路径都必须有对应的 REST 路由。
+// http-server 是**显式**注册路由的(action("guild/daily","guild")),不是按 actions 表自动生成 ——
+// 加了动作忘了注册,页面上点下去只会得到「端点不存在」。踩过一次(guild/redeem)。
+const readSrcFile = (await import("node:fs")).readFileSync;
+const declaredActionPaths = (() => {
+  const src = readSrcFile(join(ROOT, "src/web/app.js"), "utf8");
+  const start = src.indexOf("const ACTIONS = [");
+  const block = src.slice(start, src.indexOf("\n];", start));
+  return [...block.matchAll(/path:\s*"([^"]+)"/g)].map((m) => m[1]);
+})();
+const routedActionPaths = [...readSrcFile(join(ROOT, "src/http-server.mjs"), "utf8").matchAll(/action\("([^"]+)"/g)].map(
+  (m) => m[1]
+);
+const missingActionPaths = declaredActionPaths.filter((p) => !routedActionPaths.includes(p));
+check(
+  "每个动作路径都注册了 REST 路由",
+  declaredActionPaths.length > 0 && missingActionPaths.length === 0,
+  `面板声明了 ${declaredActionPaths.length} 个,缺路由:${missingActionPaths.join(",") || "无"}`
+);
 check(
   "首领按类型分三组",
   optionsOut.bossesByType.map.length === 5 &&
