@@ -44,7 +44,15 @@ const DEFAULTS = {
     },
     guild: {
       enabled: true,
-      redeem: [], // [{itemKey, amount}]
+      // 公会共享仓库兑换。**数量是「累计目标」,不是每轮数量** ——
+      // 目标 2000 就每轮看库存继续换,累计到 2000 才停(每轮不会重复换 2000)。
+      // 已换过多少存在本地账本里(db 的 guild_redeem_totals),因为兑换日志只留最近 120 条。
+      redeem: [], // [{itemKey, total}]
+      // 兑换单独排程,间隔以秒为单位(但排程 tick 是 60 秒,实际最小粒度就是 60 秒)。
+      // 共享仓库先到先得,跑得越勤越容易抢到;默认 5 分钟。
+      redeemIntervalSeconds: 300,
+      // 游戏单次兑换上限。超过会被服务端拒,所以要拆成多次调用。
+      redeemMaxPerCall: 999,
       // [{itemKey, amount}] —— 捐献接口收的是背包实例 itemId(会变),
       // 所以规则里存稳定的 itemKey,运行时再查背包换成 itemId
       donate: [],

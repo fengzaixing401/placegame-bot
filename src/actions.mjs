@@ -11,7 +11,7 @@ import * as activity from "./features/activity.mjs";
 //
 // 本模块只做两件事:把 args 与账号 rules 合成一次调用参数、把结果原样回传。
 // 具体玩法(怎么筛、什么闸门、发什么字段)都在 features/* 里,别往这里堆业务判断。
-export function buildActions(config) {
+export function buildActions(config, { redeemTotals = null } = {}) {
   const rules = (row) => rulesFor(config, row?.rules_json ? JSON.parse(row.rules_json) : null);
 
   // WebUI 的操作面板执行时把当前表单值作为本次覆盖发进来,不落库。
@@ -51,12 +51,26 @@ export function buildActions(config) {
     async guild(api, row, args = {}) {
       const r = rules(row).guild;
       return guild.dailyRoutine(api, {
-        redeem: args?.redeem ?? r.redeem,
         donate: args?.donate ?? r.donate,
         equipmentDonate: args?.equipmentDonate ?? r.equipmentDonate ?? [],
         claimDividend: args?.claimDividend ?? r.claimDividend,
         claimProgressRewards: args?.claimProgressRewards ?? r.claimProgressRewards ?? true,
         claimProgressPoints: args?.claimProgressPoints ?? r.claimProgressPoints ?? []
+      });
+    },
+
+    // 公会共享仓库兑换。**独立任务**,不跟 20 小时那一轮绑在一起 ——
+    // 它要按秒级间隔反复查库存、按累计目标慢慢换,节奏完全不同。
+    //
+    // 规则里的数量是**累计目标**而不是每轮数量:目标 2000 就每轮看库存继续换,
+    // 累计到 2000 才停。所以每轮都要问本地账本"已经换过多少"。
+    "guild.redeem": async (api, row, args = {}) => {
+      const r = rules(row).guild;
+      return guild.redeemByStock(api, {
+        entries: args?.redeem ?? r.redeem,
+        totals: redeemTotals,
+        accountId: row?.id,
+        maxPerCall: args?.redeemMaxPerCall ?? r.redeemMaxPerCall
       });
     },
 
@@ -117,7 +131,7 @@ export function buildActions(config) {
     // 表单能渲染多少算多少 —— 所以这里不 try/catch 整块。
     // 返回结构就是前端契约,显式逐字段列出,不用展开运算符 —— 免得面板内部的
     // error 之类的辅助字段悄悄漏进响应。
-    async options(api) {
+    async options(api, row) {
       const [bossPanel, guildPanel, equipmentPanel, professionPanel, activityPanel, idlePanel] = await Promise.all([
         boss.viewForOptions(api),
         guild.viewForOptions(api),
@@ -137,7 +151,12 @@ export function buildActions(config) {
         // 公会:兑换用仓库清单、捐献用背包清单 —— 两套不同的东西,接口收的字段也不同
         donatableItems: guildPanel.donatableItems,
         redeemableItems: guildPanel.redeemableItems,
-        guild: guildPanel.guild,
+        // 兑换进度(已兑换 / 目标)存在本地账本里,面板要显示"还差多少"。
+        // 账本按账号隔离,所以这里必须拿到 row —— options 的调用方是传了的(见 http-server)。
+        guild: {
+          ...guildPanel.guild,
+          redeemProgress: redeemTotals && row?.id ? redeemTotals.all(row.id) : {}
+        },
         // 副职
         professions: professionPanel.professions,
         selectedProfession: professionPanel.selectedProfession,

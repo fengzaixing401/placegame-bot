@@ -145,6 +145,13 @@ const ACTIONS = [
   { path: "inventory/decompose", job: "inventory", label: "背包分解", panel: "inventory", preview: true },
   { path: "profession/settle", job: "profession", label: "副职结算", panel: "profession" },
   { path: "guild/daily", job: "guild", label: "公会日常", panel: "guild" },
+  {
+    path: "guild/redeem",
+    job: "guild.redeem",
+    label: "公会兑换",
+    panel: "guildRedeem",
+    note: "从公会共享仓库按贡献值兑换。数量填的是「累计目标」,不是每轮数量 —— 每轮看库存继续换,累计到目标就停。独立按秒级间隔跑,不必等公会日常那一轮。"
+  },
   { path: "boss/personal", job: "boss.personal", label: "个人首领", panel: "bossPersonal", preview: true },
   { path: "boss/map", job: "boss.map", label: "地图首领", panel: "bossMap", preview: true },
   { path: "boss/world", job: "boss.world", label: "世界首领", panel: "bossWorld" },
@@ -407,7 +414,12 @@ function section(title, fields) {
 // amountWord:数量那个数是谁的存量。捐献看自己背包(持有),兑换看公会仓库(库存),
 // 两者都叫"持有"会让人以为兑换也受自己背包限制。
 // missingWord:已存的 key 不在清单里时怎么说 —— 说错了会让人以为物品丢了。
-function itemRow(init, { placeholder, items, amountWord = "持有", missingWord = "不在背包" }) {
+// amountField / amountLabel 让调用方决定那个数字叫什么:
+// 捐献和兑换都用得上,但兑换填的是「累计目标」而不是「数量」,字段名也不同(total)。
+function itemRow(
+  init,
+  { placeholder, items, amountWord = "持有", missingWord = "不在背包", amountField = "amount", amountLabel = "数量" }
+) {
   // 有清单就下拉选,没有就退回文本框手填 key
   let keyCtl;
   const known = Array.isArray(items) && items.length > 0;
@@ -432,14 +444,14 @@ function itemRow(init, { placeholder, items, amountWord = "持有", missingWord 
   } else {
     keyCtl = el("input", { type: "text", value: init?.itemKey ?? "", placeholder, spellcheck: false });
   }
-  const amount = el("input", { type: "number", className: "narrow", value: init?.amount ?? 1, min: 1, step: 1 });
+  const amount = el("input", { type: "number", className: "narrow", value: init?.[amountField] ?? 1, min: 1, step: 1 });
   return {
-    node: el("div", { className: "row inline" }, keyCtl, el("span", { className: "hint", textContent: "数量" }), amount),
+    node: el("div", { className: "row inline" }, keyCtl, el("span", { className: "hint", textContent: amountLabel }), amount),
     read: () => {
       const itemKey = (known ? keyCtl.value : keyCtl.value.trim());
       if (!itemKey) return null;
       const n = Number(amount.value);
-      return { itemKey, amount: Number.isInteger(n) && n > 0 ? n : 1 };
+      return { itemKey, [amountField]: Number.isInteger(n) && n > 0 ? n : 1 };
     }
   };
 }
@@ -718,26 +730,74 @@ function panelGuild(r, opts) {
     hint: donateHint,
     addText: "添加捐献物品"
   });
-  // 兑换**没有次数限制** —— 实测 storage 行一个限购字段都没有,只花贡献值,上限就是仓库库存。
-  // 限购在「公会补给」那一套上(supplies 行带 dailyPurchase*,另有一个 weeklySupplyRedemption),
-  // 本程序没实现补给,所以别把它的限制挂到这里来。
-  const redeem = fRows("兑换", r.guild?.redeem ?? [], (init) => itemRow(init, {
-    placeholder: "仓库物品 key",
-    items: stock,
-    amountWord: "库存",
-    missingWord: "不在公会仓库"
-  }), {
-    hint: "从公会仓库兑换,只消耗贡献值、没有次数限制;上限是仓库库存(数量列显示的就是库存)",
-    addText: "添加兑换物品"
-  });
   const payload = () => ({
     claimDividend: dividend.read(),
     claimProgressRewards: progress.read(),
-    donate: donate.read(),
-    redeem: redeem.read()
+    donate: donate.read()
   });
   return {
-    node: el("div", { className: "op-form" }, dividend.node, progress.node, donate.node, redeem.node),
+    node: el("div", { className: "op-form" }, dividend.node, progress.node, donate.node),
+    read: payload,
+    toRules: () => ({ guild: payload() })
+  };
+}
+
+// 公会共享仓库兑换:**独立面板、独立排程**。
+//
+// 数量是「累计目标」而不是「每轮数量」—— 目标 2000 就每轮看库存继续换,累计到 2000 才停。
+// 所以面板上必须显示「已兑换 X / 目标 Y」,否则用户不知道进度到哪了、也不知道为什么某轮没动静。
+function panelGuildRedeem(r, opts) {
+  const stock = opts?.redeemableItems ?? [];
+  const progress = opts?.guild?.redeemProgress ?? {};
+  const list = fRows("兑换目标", r.guild?.redeem ?? [], (init) => itemRow(init, {
+    placeholder: "仓库物品 key",
+    items: stock,
+    amountWord: "库存",
+    missingWord: "不在公会仓库",
+    amountField: "total",
+    amountLabel: "目标总数"
+  }), {
+    hint:
+      "从公会共享仓库兑换,只消耗贡献值、没有次数限制。填的是**累计目标**:每轮重新查库存继续换," +
+      "累计到目标就停(不会每轮都换这么多)。单次超过 999 会自动拆成多次调用。",
+    addText: "添加兑换目标"
+  });
+  const interval = fNum("多久查一次库存(秒)", r.guild?.redeemIntervalSeconds, {
+    min: 60,
+    max: 86400,
+    hint: "共享仓库先到先得,跑得越勤越容易抢到。**实际最小粒度是 60 秒** —— 排程本身 60 秒一跳,填更小不会更快",
+    required: true
+  });
+  const cap = fNum("单次兑换上限", r.guild?.redeemMaxPerCall, {
+    min: 1,
+    max: 999,
+    hint: "游戏限制单次最多 999。超过目标的部分会自动拆成多次调用",
+    required: true
+  });
+
+  // 进度表:每项「已兑换 / 目标」,一目了然
+  const rows = (r.guild?.redeem ?? [])
+    .map((e) => (typeof e === "string" ? { itemKey: e, total: 1 } : e))
+    .filter((e) => e?.itemKey)
+    .map((e) => {
+      const done = progress[e.itemKey] ?? 0;
+      const total = e.total ?? e.amount ?? 1;
+      const name = stock.find((s) => s.itemKey === e.itemKey)?.name ?? e.itemKey;
+      const mark = done >= total ? "已达目标" : "继续中";
+      return { text: `${name}:已兑换 ${done} / 目标 ${total}(${mark})`, kind: done >= total ? "ok" : "muted" };
+    });
+  const status = rows.length ? fStatus("当前进度", rows, "进度存在本地账本里(db 的 guild_redeem_totals),不是从游戏日志推的 —— 兑换日志只保留最近 120 条") : null;
+
+  const payload = () => {
+    const out = { redeem: list.read() };
+    const iv = interval.read();
+    if (iv !== null) out.redeemIntervalSeconds = iv;
+    const cp = cap.read();
+    if (cp !== null) out.redeemMaxPerCall = cp;
+    return out;
+  };
+  return {
+    node: el("div", { className: "op-form" }, ...(status ? [status] : []), list.node, interval.node, cap.node),
     read: payload,
     toRules: () => ({ guild: payload() })
   };
@@ -1087,6 +1147,7 @@ const PANELS = {
   inventory: panelInventory,
   profession: panelProfession,
   guild: panelGuild,
+  guildRedeem: panelGuildRedeem,
   bossPersonal: panelBossPersonal,
   bossMap: panelBossMap,
   bossWorld: panelBossWorld,

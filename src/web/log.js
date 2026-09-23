@@ -413,7 +413,6 @@
       for (var i = 0; i < got.rows.length; i++) out.push(L(fmt(got.rows[i]) + resultNote(got.rows[i].result), "", 1));
       got.notes.forEach(function (n) { out.push(L(n, "muted", 1)); });
     };
-    group(d.redeemed, "公会兑换", function (r) { return (r.name || r.itemKey || "未知") + " x" + N(r.amount); });
     group(d.donated, "公会捐献", function (r) { return (r.name || r.itemKey || "未知") + " x" + N(r.amount); });
     group(d.equipmentDonated, "捐献装备", function (r) { return eqName(r.equipment || r) ; });
     group(d.progress, "领取进度奖励", function (r) { return N(r.point) + " 点档位"; });
@@ -422,7 +421,37 @@
       var m = d.dividend.message;
       out.push(L(typeof m === "string" && m ? "公会分红:" + m : "已领取公会分红", "ok"));
     }
-    if (!any) out.push(L("公会日常:这次没有可执行的项(规则里没配兑换/捐献)", "muted"));
+    if (!any) out.push(L("公会日常:这次没有可执行的项(规则里没配捐献)", "muted"));
+    errLines(d.errors, out);
+  };
+
+  // 公会共享仓库兑换(独立任务)。
+  // 兑换已经移出公会日常,所以这里只说"这一轮实际换到了多少 / 为什么没换";
+  // 累计进度(已兑换 / 目标)在面板上看,日志里不重复报。
+  R.guildRedeem = function (d, out) {
+    if (!d) { out.push(L("服务端没有返回兑换结果", "muted")); return; }
+    var got = take(d.redeemed);
+    if (got.rows.length) {
+      out.push(L("本轮兑换 " + got.rows.length + " 项", "ok"));
+      got.rows.forEach(function (r) {
+        var bits = [(r.name || r.itemKey || "未知") + " x" + N(r.amount)];
+        // 累计进度是这一项最要紧的数字 —— 目标还没到就说明后面几轮还会接着换
+        if (isNum(r.redeemed) && isNum(r.total)) bits.push("累计 " + N(r.redeemed) + "/" + N(r.total));
+        if (isNum(r.stock)) bits.push("换前库存 " + N(r.stock));
+        out.push(L(bits.join(" · "), "", 1));
+      });
+      got.notes.forEach(function (n) { out.push(L(n, "muted", 1)); });
+    } else {
+      out.push(L("本轮没有可兑换的(仓库库存为 0,或已达目标)", "muted"));
+    }
+    var sk = take(d.skipped);
+    if (sk.rows.length) {
+      out.push(L("跳过 " + sk.rows.length + " 项", "muted"));
+      sk.rows.forEach(function (s) {
+        out.push(L((s.name || s.itemKey || "未知") + " —— " + (s.reason || "未记录原因"), "muted", 1));
+      });
+      sk.notes.forEach(function (n) { out.push(L(n, "muted", 1)); });
+    }
     errLines(d.errors, out);
   };
 
@@ -653,6 +682,7 @@
     inventory: "背包分解",
     profession: "副职结算",
     guild: "公会日常",
+    "guild.redeem": "公会兑换",
     "boss.personal": "个人首领",
     "boss.map": "地图首领",
     "boss.world": "世界首领",
@@ -662,9 +692,10 @@
     status: "账号状态"
   };
 
-  // 动作 → 渲染器。三类首领共用 R.boss
+  // 动作 → 渲染器。三类首领共用 R.boss;兑换有自己的一份(结果形状不同)
   var RENDER_BY_JOB = {
     collect: "collect", inventory: "inventory", profession: "profession", guild: "guild",
+    "guild.redeem": "guildRedeem",
     "boss.personal": "boss", "boss.map": "boss", "boss.world": "boss",
     activity: "activity", dailyRun: "dailyRun"
   };

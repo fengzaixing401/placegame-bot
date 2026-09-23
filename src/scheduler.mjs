@@ -188,6 +188,17 @@ export class Scheduler {
     }
     if (rules.guild?.enabled) {
       jobs.push({ key: "guild", idem: `guild:${slot(rules.guild.intervalHours)}` });
+      // 公会兑换是**独立任务**:要按秒级间隔反复查库存、按累计目标慢慢换,
+      // 跟 20 小时一轮的捐献/分红节奏完全不同,绑在一起会互相拖累。
+      //
+      // 间隔以秒为单位(用户要求自己设),但**排程 tick 是 60 秒一次** ——
+      // 所以实际最小粒度就是 60 秒,填 30 也不会更快。这一点写在面板提示里。
+      // 没配兑换清单就不排,免得空跑。
+      const secs = Number(rules.guild.redeemIntervalSeconds);
+      const hasRedeem = Array.isArray(rules.guild.redeem) && rules.guild.redeem.length > 0;
+      if (hasRedeem && Number.isFinite(secs) && secs > 0) {
+        jobs.push({ key: "guild.redeem", idem: `guild.redeem:${Math.floor(now.getTime() / (secs * 1000))}` });
+      }
     }
     if (rules.boss?.enabled) {
       // 地图首领不受每日次数限制,只受刷新时间限制(服务端自报),所以按刷新格子对齐排

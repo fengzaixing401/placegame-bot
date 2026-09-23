@@ -8,6 +8,7 @@ import { fetchClientVersion } from "./version.mjs";
 import { Scheduler } from "./scheduler.mjs";
 import { createHttpServer } from "./http-server.mjs";
 import { buildActions } from "./actions.mjs";
+import { RedeemTotals } from "./redeem-totals.mjs";
 
 async function main() {
   const config = await loadConfig();
@@ -48,7 +49,8 @@ async function main() {
     timeoutMs: config.requestTimeoutMs
   });
 
-  const actions = buildActions(config);
+  // 公会兑换的累计账本。规则里的数量是"累计目标"不是每轮数量,所以要把已换过多少存下来。
+  const actions = buildActions(config, { redeemTotals: new RedeemTotals(db) });
 
   const scheduler = new Scheduler({ db, store, service, config, actions });
   if (config.schedulerEnabled) {

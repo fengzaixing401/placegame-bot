@@ -371,6 +371,32 @@ check("dailyRun 逐段套用对应渲染器", () => {
   assert.match(t, /跳过:公会日常/);
 });
 
+check("公会兑换说清本轮换了多少与累计进度,跳过原因照登", () => {
+  const sample = {
+    redeemed: [{ itemKey: "skill_page", name: "技能残页", amount: 999, stock: 2000, total: 2000, redeemed: 999 }],
+    skipped: [{ itemKey: "fire_crystal", name: "火晶石", reason: "仓库库存为 0", total: 500, redeemed: 0, stock: 0 }],
+    errors: []
+  };
+  const t = text(sample, "guild.redeem");
+  assert.match(t, /本轮兑换 1 项/);
+  assert.match(t, /技能残页 x999/);
+  // 累计进度是这一项最要紧的数字 —— 没到目标就说明后面几轮还会接着换
+  // (数字都过 N(),会带千分位)
+  assert.match(t, /累计 999\/2,000/);
+  assert.match(t, /换前库存 2,000/);
+  assert.match(t, /火晶石 —— 仓库库存为 0/);
+  assert.doesNotMatch(t, /[{}]/);
+});
+
+check("公会兑换本轮没换成也说清楚是为什么", () => {
+  const t = text(
+    { redeemed: [], skipped: [{ itemKey: "k1", name: "技能残页", reason: "已达目标 2000(已兑换 2000)" }], errors: [] },
+    "guild.redeem"
+  );
+  assert.match(t, /本轮没有可兑换的/);
+  assert.match(t, /已达目标 2000/);
+});
+
 check("渲染器抛错时说明白,不吞结果", () => {
   const broken = { get mode() { throw new Error("炸了"); } };
   const t = text(broken, "inventory");

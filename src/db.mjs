@@ -60,6 +60,19 @@ CREATE TABLE IF NOT EXISTS web_sessions (
 
 CREATE INDEX IF NOT EXISTS idx_web_sessions_expires
   ON web_sessions (expires_at);
+
+-- 公会兑换的累计计数。规则里的数量是「累计目标」而不是「每轮数量」
+-- (用户要的语义:目标 2000,每轮按库存继续换,累计到 2000 就停),
+-- 所以必须跨轮记住"已经换过多少"。
+-- 为什么不从 /api/guild/redemption-logs 反推:那份日志只保留最近 120 条
+-- (实测 pagination.total=120),算不出长期累计,而且分页里也不保证有自己那几条。
+CREATE TABLE IF NOT EXISTS guild_redeem_totals (
+  account_id TEXT NOT NULL,
+  item_key   TEXT NOT NULL,
+  redeemed   INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (account_id, item_key)
+);
 `;
 
 export function openDb(dbPath) {

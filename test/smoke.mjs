@@ -184,7 +184,9 @@ function fakeFetch(url, opts = {}) {
         guild: {
           storage: [
             { itemKey: "k1", name: "技能残页", quality: "blue", amount: 2 },
-            { itemKey: "k2", name: "洗练石", quality: "purple", amount: 1 }
+            { itemKey: "k2", name: "洗练石", quality: "purple", amount: 1 },
+            // 库存大于单次上限(999),用来验"拆成多次调用"
+            { itemKey: "k3", name: "遗迹碎片", quality: "orange", amount: 2500 }
           ],
           equipmentDonationMinQuality: "blue",
           canDonate: true,
@@ -339,6 +341,7 @@ const { Scheduler, zonedParts } = await import("../src/scheduler.mjs");
 const { createHttpServer } = await import("../src/http-server.mjs");
 const { SettingsStore } = await import("../src/settings.mjs");
 const { buildActions } = await import("../src/actions.mjs");
+const { RedeemTotals } = await import("../src/redeem-totals.mjs");
 const { unwrap } = await import("../src/util.mjs");
 const { GameApiClient } = await import("../src/api-client.mjs");
 const bossFeature = await import("../src/features/boss.mjs");
@@ -398,7 +401,7 @@ console.log("\n[3] 账号与动作");
 const db = openDb(config.dbPath);
 const store = new AccountStore(db, new SecretBox(config.masterKeyB64));
 const service = new AccountService({ store, baseUrl: config.baseUrl, version: "0.2.50", fetchImpl: fakeFetch });
-const actions = buildActions(config);
+const actions = buildActions(config, { redeemTotals: new RedeemTotals(db) });
 const scheduler = new Scheduler({ db, store, service, config, actions, logger: { log() {}, error() {} } });
 
 service.create({
@@ -554,7 +557,8 @@ const prof = await service.run("fzx401", (api, row) => actions.profession(api, r
 check("副职 settle+select+enqueue", prof.settled && prof.selected?.selected === "fishing" && prof.enqueued[0]?.count === 5);
 
 const g = await service.run("fzx401", (api, row) => actions.guild(api, row));
-check("公会 redeem 用 itemKey", g.redeemed[0]?.result?.redeemed === "k1");
+// 兑换已经**移出**公会日常(它是独立任务 guild.redeem,见下)—— 所以这里不再有 redeemed 字段
+check("公会日常里不再包含兑换", g.redeemed === undefined, JSON.stringify(Object.keys(g)));
 check("公会 donate 用 itemId", g.donated[0]?.result?.donated === "i1");
 check("公会分红", g.dividend?.dividend === 500);
 // 贡献奖励(游戏里叫「进度奖励」):按服务端的 canClaim 领,不按写死的档位序号。
@@ -578,6 +582,61 @@ check(
     .sort((a, b) => a - b)
     .join(",") === "30,90,120"
 );
+
+// ---- 公会共享仓库兑换(独立任务)----
+// 规则里的数量是**累计目标**,不是每轮数量:目标 5 就每轮看库存继续换,累计到 5 才停。
+// 库存 2、目标 5 => 第一轮只能换 2(库存封顶),后面几轮接着补。
+const redeemAmounts = (from) => calls.slice(from).filter((c) => c.path === "/api/guild/redeem").map((c) => c.body?.amount);
+const doRedeem = (rules) => service.run("fzx401", (api, row) => actions["guild.redeem"](api, row, rules));
+
+const rdFrom = calls.length;
+const rd1 = await doRedeem({ redeem: [{ itemKey: "k1", total: 5 }] });
+check(
+  "按库存封顶:目标 5 但库存只有 2,一轮只换 2",
+  rd1.redeemed[0]?.amount === 2 && rd1.redeemed[0]?.redeemed === 2 && rd1.redeemed[0]?.total === 5,
+  JSON.stringify(rd1.redeemed)
+);
+check("一轮只发一次请求(没超过单次上限)", redeemAmounts(rdFrom).length === 1, JSON.stringify(redeemAmounts(rdFrom)));
+
+const rd2 = await doRedeem({ redeem: [{ itemKey: "k1", total: 5 }] });
+check("第二轮继续,累计到 4 而不是重头再来", rd2.redeemed[0]?.amount === 2 && rd2.redeemed[0]?.redeemed === 4, JSON.stringify(rd2.redeemed));
+
+const rd3 = await doRedeem({ redeem: [{ itemKey: "k1", total: 5 }] });
+check("第三轮把差额补到 5", rd3.redeemed[0]?.amount === 1 && rd3.redeemed[0]?.redeemed === 5, JSON.stringify(rd3.redeemed));
+
+const rd4From = calls.length;
+const rd4 = await doRedeem({ redeem: [{ itemKey: "k1", total: 5 }] });
+check(
+  "达到目标就停,不再发请求",
+  rd4.redeemed.length === 0 && rd4.skipped[0]?.reason?.includes("已达目标") && redeemAmounts(rd4From).length === 0,
+  JSON.stringify({ redeemed: rd4.redeemed, skipped: rd4.skipped, calls: redeemAmounts(rd4From) })
+);
+
+// 库存 2500、目标 2500:游戏单次上限 999,所以要拆成 999 + 999 + 502
+const rdBigFrom = calls.length;
+const rdBig = await doRedeem({ redeem: [{ itemKey: "k3", total: 2500 }], redeemMaxPerCall: 999 });
+check(
+  "超过单次上限自动拆成多次调用",
+  JSON.stringify(redeemAmounts(rdBigFrom)) === "[999,999,502]" && rdBig.redeemed[0]?.amount === 2500,
+  JSON.stringify(redeemAmounts(rdBigFrom))
+);
+
+// 库存为 0 的项直接跳过 —— 不发注定失败的请求
+const rdZeroFrom = calls.length;
+const rdZero = await doRedeem({ redeem: [{ itemKey: "不存在的物品", total: 10 }] });
+check(
+  "不在仓库里的项跳过,不发请求",
+  rdZero.redeemed.length === 0 && rdZero.skipped.length === 1 && redeemAmounts(rdZeroFrom).length === 0,
+  JSON.stringify({ skipped: rdZero.skipped, calls: redeemAmounts(rdZeroFrom) })
+);
+
+// 账本按账号隔离,且只记成功的那些
+const { RedeemTotals: RT } = await import("../src/redeem-totals.mjs");
+const totalsProbe = new RT(db);
+check("累计账本按账号+物品记", totalsProbe.get(store.getByLabel("fzx401").id, "k1") === 5, String(totalsProbe.get(store.getByLabel("fzx401").id, "k1")));
+check("别的账号读不到这份进度", totalsProbe.get("别的账号", "k1") === 0);
+totalsProbe.reset(store.getByLabel("fzx401").id);
+check("重置后归零", totalsProbe.get(store.getByLabel("fzx401").id, "k1") === 0);
 
 const bm = await service.run("fzx401", (api, row) => actions["boss.map"](api, row));
 const bmSkip = (key) => bm.skipped.find((s) => s.bossKey === key);
@@ -971,6 +1030,41 @@ check(
   winIdem("2026-09-01T01:59:00.000Z") === null && winIdem("2026-09-01T03:00:00.000Z") === null,
   `${winIdem("2026-09-01T01:59:00.000Z")} / ${winIdem("2026-09-01T03:00:00.000Z")}`
 );
+
+// 公会兑换是独立任务,间隔**以秒为单位**(用户要求自己设)。
+// 幂等键取秒级时间片编号,所以同一个片里只跑一次,重启也不会重复。
+// 注意排程 tick 是 60 秒一次 —— 实际最小粒度就是 60 秒,填更小不会更快。
+const rdRules = {
+  guild: { enabled: true, intervalHours: 20, redeem: [{ itemKey: "k1", total: 5 }], redeemIntervalSeconds: 300 }
+};
+const rdIdem = (iso) => {
+  const now = new Date(iso);
+  return (
+    scheduler
+      .plannedJobs(rdRules, zonedParts(now, config.timezone), now)
+      .find((j) => j.key === "guild.redeem")?.idem ?? null
+  );
+};
+check(
+  "兑换按秒级间隔排,同一片里键不变",
+  rdIdem("2026-09-01T02:00:00.000Z") !== null && rdIdem("2026-09-01T02:00:00.000Z") === rdIdem("2026-09-01T02:04:59.000Z"),
+  `${rdIdem("2026-09-01T02:00:00.000Z")} / ${rdIdem("2026-09-01T02:04:59.000Z")}`
+);
+check(
+  "跨片换新键(300 秒后才会再跑一轮)",
+  rdIdem("2026-09-01T02:00:00.000Z") !== rdIdem("2026-09-01T02:05:00.000Z"),
+  `${rdIdem("2026-09-01T02:00:00.000Z")} / ${rdIdem("2026-09-01T02:05:00.000Z")}`
+);
+check("没配兑换清单就不排,免得空跑", (() => {
+  const now = new Date("2026-09-01T02:00:00.000Z");
+  const r = { guild: { enabled: true, intervalHours: 20, redeem: [], redeemIntervalSeconds: 300 } };
+  return !scheduler.plannedJobs(r, zonedParts(now, config.timezone), now).some((j) => j.key === "guild.redeem");
+})());
+check("公会日常与兑换是两个独立任务,各有各的键", (() => {
+  const now = new Date("2026-09-01T02:00:00.000Z");
+  const keys = scheduler.plannedJobs(rdRules, zonedParts(now, config.timezone), now).map((j) => j.key);
+  return keys.includes("guild") && keys.includes("guild.redeem");
+})());
 
 // 个人首领按"每天到点打一次"排,不再按间隔切绝对时间片:免费次数是北京时间每日重置的,
 // 24 小时片的片界落在 UTC 00:00(北京 08:00),与重置时刻错开。

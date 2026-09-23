@@ -90,20 +90,17 @@ export async function viewForOptions(api) {
   };
 }
 
-// ④ 公会兑换 + 捐献 + 分红。
+// ④ 公会捐献 + 分红 + 贡献奖励。
+//
+// **兑换不在这里** —— 它是独立任务 guild.redeem(见 redeemByStock):
+// 兑换要按秒级间隔反复查库存、按累计目标慢慢换,与 20 小时一轮的捐献/分红节奏完全不同,
+// 绑在一起会互相拖累。
 // 注意接口不对称(CLI 已确认,勿"统一"):redeem 用 itemKey,donate 用 itemId。
 export async function dailyRoutine(
   api,
-  {
-    redeem = [],
-    donate = [],
-    equipmentDonate = [],
-    claimDividend = true,
-    claimProgressRewards = true,
-    claimProgressPoints = []
-  } = {}
+  { donate = [], equipmentDonate = [], claimDividend = true, claimProgressRewards = true, claimProgressPoints = [] } = {}
 ) {
-  const out = { redeemed: [], donated: [], equipmentDonated: [], dividend: null, progress: [], errors: [] };
+  const out = { donated: [], equipmentDonated: [], dividend: null, progress: [], errors: [] };
 
   // 中文名解析器。日志里只有 itemKey 就会渲出 skill_page 这种裸键,
   // 而清单本来就要查(捐献必须靠它换 itemId),顺手把名字带上。
@@ -115,7 +112,6 @@ export async function dailyRoutine(
       return rows;
     };
   };
-  const stockRows = lazyList(async () => (await redeemableItems(api)).items);
 
   // 规则条目既允许写成裸键("skill_page"),也允许写成 {itemKey, amount}。
   const asEntry = (entry) => ({
@@ -123,20 +119,6 @@ export async function dailyRoutine(
     amount: typeof entry === "string" ? 1 : entry?.amount ?? 1,
     itemId: typeof entry === "string" ? null : entry?.itemId ?? null
   });
-
-  for (const entry of redeem) {
-    const { itemKey, amount } = asEntry(entry);
-    if (!itemKey) {
-      out.errors.push({ step: "redeem", error: "缺少 itemKey", entry });
-      continue;
-    }
-    const name = (await stockRows()).find((r) => r.itemKey === itemKey)?.name ?? null;
-    try {
-      out.redeemed.push({ itemKey, name, amount, result: await redeemItem(api, itemKey, amount) });
-    } catch (err) {
-      out.errors.push({ step: "redeem", itemKey, name, error: err.message });
-    }
-  }
 
   // 捐献:规则给的是 itemKey,这里查一次背包换成实例 itemId。背包只在真的要捐时才查。
   let bag = null;
@@ -216,6 +198,86 @@ export async function dailyRoutine(
 export async function redeemItem(api, itemKey, amount = 1) {
   if (!itemKey) throw new Error("redeemItem 需要 itemKey");
   return api.post("/api/guild/redeem", { itemKey, amount });
+}
+
+// 游戏对单次兑换的上限。超过会被服务端拒,所以要拆成多次调用。
+export const REDEEM_MAX_PER_CALL = 999;
+
+// 按「累计目标 + 当前库存」兑换 —— 规则里的数量是**累计目标**,不是每轮数量。
+// 用户要的语义:目标 2000,每轮看库存继续换,累计到 2000 就停;不要每轮都换 2000。
+//
+// 每项一轮的做法:
+//   ① remaining = 目标 − 已累计(本地记账)。已达标 → 跳过。
+//   ② want = min(remaining, 当前库存)。库存 0 → 跳过,**不发注定失败的请求**。
+//   ③ 按单次上限(999)拆成多次调用;**只把成功的次数累加进账本** ——
+//      失败的不算,否则目标会被虚报成已达成。
+//   ④ 某次失败就停那一项(库存被抢光/网络抖),不空转。
+export async function redeemByStock(api, { entries = [], totals = null, accountId = null, maxPerCall = REDEEM_MAX_PER_CALL } = {}) {
+  const out = { redeemed: [], skipped: [], errors: [] };
+  const list = Array.isArray(entries) ? entries : [];
+  if (list.length === 0) return out;
+
+  const cap = Math.max(1, Math.min(REDEEM_MAX_PER_CALL, Math.floor(Number(maxPerCall)) || REDEEM_MAX_PER_CALL));
+
+  // 库存只在真要换时才查,一轮只查一次;查不到就整轮收手 ——
+  // 拿旧数据瞎换比不换更糟(可能换到已经被抢光的物品)。
+  let snap = null;
+  const stock = async () => {
+    if (snap === null) snap = await redeemableItems(api).catch(() => null);
+    return snap;
+  };
+
+  for (const entry of list) {
+    const itemKey = typeof entry === "string" ? entry : entry?.itemKey;
+    // total 是累计目标。老字段名 amount 也认(它以前是"每轮数量",语义已改,这里当目标用)。
+    const total = Number(typeof entry === "string" ? 1 : (entry?.total ?? entry?.amount ?? 1));
+    if (!itemKey || !Number.isFinite(total) || total <= 0) {
+      out.errors.push({ step: "redeem", error: "缺少 itemKey 或目标数量", entry });
+      continue;
+    }
+
+    const already = totals && accountId ? totals.get(accountId, itemKey) : 0;
+    const remaining = total - already;
+    if (remaining <= 0) {
+      out.skipped.push({ itemKey, reason: `已达目标 ${total}(已兑换 ${already})`, total, redeemed: already });
+      continue;
+    }
+
+    const s = await stock();
+    if (!s) {
+      out.errors.push({ step: "redeem", itemKey, error: "读取公会仓库失败,本轮跳过" });
+      break; // 仓库读不到,后面几项同样读不到,不必逐项重试
+    }
+    const row = s.items.find((r) => r.itemKey === itemKey);
+    const name = row?.name ?? null;
+    if (!row) {
+      out.skipped.push({ itemKey, name, reason: "不在公会仓库里", total, redeemed: already });
+      continue;
+    }
+    const inStock = Number.isFinite(row.amount) ? row.amount : 0;
+    const want = Math.min(remaining, inStock);
+    if (want <= 0) {
+      out.skipped.push({ itemKey, name, reason: "仓库库存为 0", total, redeemed: already, stock: inStock });
+      continue;
+    }
+
+    let done = 0;
+    while (done < want) {
+      const chunk = Math.min(cap, want - done);
+      try {
+        await redeemItem(api, itemKey, chunk);
+      } catch (err) {
+        out.errors.push({ step: "redeem", itemKey, name, amount: chunk, error: err.message });
+        break;
+      }
+      done += chunk;
+      if (totals && accountId) totals.add(accountId, itemKey, chunk);
+    }
+    if (done > 0) {
+      out.redeemed.push({ itemKey, name, amount: done, stock: inStock, total, redeemed: already + done });
+    }
+  }
+  return out;
 }
 
 export async function donateItem(api, itemId, amount = 1) {
