@@ -251,7 +251,9 @@ export async function redeemByStock(api, { entries = [], totals = null, accountI
     const row = s.items.find((r) => r.itemKey === itemKey);
     const name = row?.name ?? null;
     if (!row) {
-      out.skipped.push({ itemKey, name, reason: "不在公会仓库里", total, redeemed: already });
+      // 不在仓库里不是失败 —— 这正是"定时蹲守"的常态:想抢的东西还没上架
+      // (比如等会长做完补给才进共享仓库)。安静跳过,上架后下一轮自然就换到了。
+      out.skipped.push({ itemKey, name, reason: "还没上架(仓库里没有),继续等", total, redeemed: already });
       continue;
     }
     const inStock = Number.isFinite(row.amount) ? row.amount : 0;

@@ -621,13 +621,19 @@ check(
   JSON.stringify(redeemAmounts(rdBigFrom))
 );
 
-// 库存为 0 的项直接跳过 —— 不发注定失败的请求
+// 不在仓库里的项直接跳过 —— 不发注定失败的请求。
+// 这不是失败,而是"定时蹲守"的常态:想抢的东西还没上架(等会长做完补给才进共享仓库),
+// 所以措辞要说"继续等",不能写成错误。
 const rdZeroFrom = calls.length;
 const rdZero = await doRedeem({ redeem: [{ itemKey: "不存在的物品", total: 10 }] });
 check(
-  "不在仓库里的项跳过,不发请求",
-  rdZero.redeemed.length === 0 && rdZero.skipped.length === 1 && redeemAmounts(rdZeroFrom).length === 0,
-  JSON.stringify({ skipped: rdZero.skipped, calls: redeemAmounts(rdZeroFrom) })
+  "还没上架的项跳过、不发请求,且不算失败",
+  rdZero.redeemed.length === 0 &&
+    rdZero.skipped.length === 1 &&
+    rdZero.skipped[0].reason.includes("还没上架") &&
+    rdZero.errors.length === 0 &&
+    redeemAmounts(rdZeroFrom).length === 0,
+  JSON.stringify({ skipped: rdZero.skipped, errors: rdZero.errors, calls: redeemAmounts(rdZeroFrom) })
 );
 
 // 账本按账号隔离,且只记成功的那些

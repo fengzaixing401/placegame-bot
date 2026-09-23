@@ -423,14 +423,34 @@ function section(title, fields) {
 // missingWord:已存的 key 不在清单里时怎么说 —— 说错了会让人以为物品丢了。
 // amountField / amountLabel 让调用方决定那个数字叫什么:
 // 捐献和兑换都用得上,但兑换填的是「累计目标」而不是「数量」,字段名也不同(total)。
+//
+// freeKey: 物品键用「输入框 + datalist」而不是下拉 —— 可以从清单里挑,也可以手填任意 key。
+// **兑换必须要这个**:想抢的东西可能此刻还没上架(仓库里没有),用下拉就根本选不到它
+// (踩过:技能残页要等会长做完补给才进共享仓库,下拉里当时压根没这一项)。
 function itemRow(
   init,
-  { placeholder, items, amountWord = "持有", missingWord = "不在背包", amountField = "amount", amountLabel = "数量" }
+  { placeholder, items, amountWord = "持有", missingWord = "不在背包", amountField = "amount", amountLabel = "数量", freeKey = false }
 ) {
   // 有清单就下拉选,没有就退回文本框手填 key
   let keyCtl;
   const known = Array.isArray(items) && items.length > 0;
-  if (known) {
+  if (freeKey) {
+    // 输入框 + datalist:既能从清单里挑,也能手填清单里还没有的 key。
+    // 注意 list 属性只能用 setAttribute 设 —— input.list 是只读的,直接赋值会被忽略。
+    const listId = `pgl-items-${Math.random().toString(36).slice(2, 9)}`;
+    keyCtl = el("input", { type: "text", value: init?.itemKey ?? "", placeholder, spellcheck: false });
+    keyCtl.setAttribute("list", listId);
+    const dl = el("datalist", { id: listId });
+    for (const it of items) {
+      const marks = [];
+      if (it.quality) marks.push(PGL.quality(it.quality));
+      if (it.amount !== null && it.amount !== undefined) marks.push(`${amountWord} ${it.amount}`);
+      const base = it.name ?? it.itemKey;
+      // datalist 的候选项显示 label(有就显示它),值仍是 key
+      dl.append(el("option", { value: it.itemKey, label: marks.length ? `${base}(${marks.join(" · ")})` : base }));
+    }
+    keyCtl.append(dl);
+  } else if (known) {
     keyCtl = el("select", {});
     keyCtl.append(el("option", { value: "", textContent: "— 选择物品 —" }));
     for (const it of items) {
@@ -455,7 +475,8 @@ function itemRow(
   return {
     node: el("div", { className: "row inline" }, keyCtl, el("span", { className: "hint", textContent: amountLabel }), amount),
     read: () => {
-      const itemKey = (known ? keyCtl.value : keyCtl.value.trim());
+      // 下拉的 value 本来就是干净的;手填的要 trim(手输很容易带空格)
+      const itemKey = (known && !freeKey) ? keyCtl.value : keyCtl.value.trim();
       if (!itemKey) return null;
       const n = Number(amount.value);
       return { itemKey, [amountField]: Number.isInteger(n) && n > 0 ? n : 1 };
@@ -757,15 +778,19 @@ function panelGuildRedeem(r, opts) {
   const stock = opts?.redeemableItems ?? [];
   const progress = opts?.guild?.redeemProgress ?? {};
   const list = fRows("兑换目标", r.guild?.redeem ?? [], (init) => itemRow(init, {
-    placeholder: "仓库物品 key",
+    placeholder: "仓库物品 key(可手填)",
     items: stock,
     amountWord: "库存",
     missingWord: "不在公会仓库",
     amountField: "total",
-    amountLabel: "目标总数"
+    amountLabel: "目标总数",
+    // 兑换必须要手填能力:想抢的东西可能此刻还没上架(仓库里没有),
+    // 下拉就选不到它 —— 而"等它上架再抢"正是这个功能的用途。
+    freeKey: true
   }), {
     hint:
-      "从公会共享仓库兑换,只消耗贡献值、没有次数限制。填的是**累计目标**:每轮重新查库存继续换," +
+      "从公会共享仓库兑换,只消耗贡献值、没有次数限制。物品可以从下拉里挑,也可以**手填 key**" +
+      "(比如还没上架的 —— 仓库里没有就等着,一上架就自动换)。填的是**累计目标**:每轮重新查库存继续换," +
       "累计到目标就停(不会每轮都换这么多)。单次超过 999 会自动拆成多次调用。",
     addText: "添加兑换目标"
   });
