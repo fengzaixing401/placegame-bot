@@ -1602,9 +1602,33 @@ async function loadTasks() {
   const labels = new Map(accountsCache.map((a) => [a.id, a.label]));
   const box = $("tasks-list");
   box.textContent = "";
-  const runs = data.recent ?? [];
-  if (!runs.length) {
+
+  // 先把 result_json 解析好(下面两处都要用),再按"有没有真干活"过滤。
+  // 兑换每 5 分钟一轮、绝大多数是"还没上架"的空轮,不藏的话最近 50 条里一半是它,
+  // 真正有事发生的轮次全被挤出去 —— 列表就失去了意义。
+  const parsed = (data.recent ?? []).map((r) => {
+    let result = null;
+    try {
+      result = r.result_json ? JSON.parse(r.result_json) : null;
+    } catch {
+      result = null; // 落库文本坏了就当没有,不影响整表渲染
+    }
+    return { r, result };
+  });
+  if (!parsed.length) {
     box.append(el("p", { className: "hint", textContent: "还没有执行记录。" }));
+    return;
+  }
+  const showQuiet = $("show-quiet")?.checked === true;
+  const kept = showQuiet ? parsed : parsed.filter((x) => !PGLog.isQuiet(x.result, x.r.job_key));
+  const hidden = parsed.length - kept.length;
+  if (!kept.length) {
+    box.append(
+      el("p", {
+        className: "hint",
+        textContent: `最近 ${parsed.length} 条都是没有实际动作的轮次(比如兑换还在等目标上架)。勾上「显示无操作轮次」可以看。`
+      })
+    );
     return;
   }
 
@@ -1615,13 +1639,7 @@ async function loadTasks() {
 
   // 结果列:一行中文摘要;点开才展开完整日志,免得列表被撑爆
   const rows = [];
-  for (const r of runs) {
-    let result = null;
-    try {
-      result = r.result_json ? JSON.parse(r.result_json) : null;
-    } catch {
-      result = null; // 落库文本坏了就当没有,不影响整表渲染
-    }
+  for (const { r, result } of kept) {
     const tr = el(
       "tr",
       {},
@@ -1663,9 +1681,15 @@ async function loadTasks() {
       el("tbody", {}, rows)
     )
   );
+  // 藏了多少要说出来 —— 否则用户会以为任务没在跑
+  if (hidden > 0) {
+    box.append(el("p", { className: "hint", textContent: `已隐藏 ${hidden} 条无操作轮次(勾上上面的「显示无操作轮次」可以看)` }));
+  }
 }
 
 $("refresh-tasks").addEventListener("click", loadTasks);
+// 勾选立刻重渲染,不用再点刷新
+$("show-quiet").addEventListener("change", loadTasks);
 
 $("tick").addEventListener("click", async (e) => {
   e.target.disabled = true;

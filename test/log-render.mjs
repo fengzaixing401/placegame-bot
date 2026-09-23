@@ -410,6 +410,21 @@ check("清空前本来就没记录也说清楚", () => {
   assert.match(t, /清空前本来就没有记录/);
 });
 
+check("isQuiet:空轮次的兑换算无操作,换到了就不算", () => {
+  // 兑换每 5 分钟一轮、绝大多数是"目标还没上架"的空轮 —— 列表默认要把这类收起来,
+  // 否则最近 50 条里一半是它,真正有事发生的轮次全被挤出去。
+  assert.equal(PGLog.isQuiet({ redeemed: [], skipped: [{ itemKey: "x" }], errors: [] }, "guild.redeem"), true);
+  assert.equal(PGLog.isQuiet({ redeemed: [{ itemKey: "x", amount: 1 }], skipped: [], errors: [] }, "guild.redeem"), false);
+  assert.equal(PGLog.isQuiet(null, "guild.redeem"), true);
+});
+
+check("isQuiet:没声明的任务一律按有事算", () => {
+  // 宁可多显示一条,也不能把真有事的那轮藏起来
+  assert.equal(PGLog.isQuiet({ attempted: [] }, "boss.map"), false);
+  assert.equal(PGLog.isQuiet(null, "boss.map"), false);
+  assert.equal(PGLog.isQuiet(undefined, "boss.world"), false);
+});
+
 check("渲染器抛错时说明白,不吞结果", () => {
   const broken = { get mode() { throw new Error("炸了"); } };
   const t = text(broken, "inventory");

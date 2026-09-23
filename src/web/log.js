@@ -769,6 +769,22 @@
     return bad ? head + "(" + bad + " 项失败)" : head;
   };
 
+  // 「这一轮其实啥也没干」—— 任务列表默认把这类收起来,免得把有事发生的轮次挤出去。
+  //
+  // 为什么需要:兑换任务每 5 分钟跑一次(一天 288 条),而绝大多数轮次是
+  // 「目标还没上架」的空轮。列表只放最近 50 条,于是真正有事发生的轮次全被刷没了。
+  //
+  // 只给"跑得勤、大多数轮次无事可做"的任务声明;没声明的按"有事"算 ——
+  // 宁可多显示一条,也不能把真有事的那轮藏起来。
+  var QUIET_WHEN = {
+    "guild.redeem": function (d) { return !(((d && d.redeemed) || []).length); }
+  };
+  var isQuiet = function (data, key) {
+    var fn = QUIET_WHEN[key];
+    if (!fn) return false;
+    try { return !!fn(data); } catch (e) { return false; }
+  };
+
   // 全程 textContent:游戏返回的名称是不可信输入,绝不能拼进 innerHTML
   var renderInto = function (host, data, key) {
     if (!host) return;
@@ -805,6 +821,7 @@
     lines: lines,
     oneLine: oneLine,
     renderInto: renderInto,
+    isQuiet: isQuiet,
     JOB_LABEL: JOB_LABEL,
     label: function (key) { return JOB_LABEL[key] || key || ""; }
   };

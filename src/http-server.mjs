@@ -228,14 +228,16 @@ export function createHttpServer({ config, service, store, settings, scheduler, 
   route("GET", /^\/config\/default-rules$/, async () => config.defaultRules);
 
   // 排程
+  // limit 给到 200 而不是 50:列表默认会滤掉"啥也没干"的轮次(兑换每 5 分钟一轮),
+  // 只取 50 条的话滤完只剩几小时的历史。行里的 result_json 已经过落库裁剪,不算大。
   route("GET", /^\/tasks$/, async () => ({
     scheduler: scheduler?.status() ?? { enabled: false },
-    recent: scheduler?.recentRuns({ limit: 50 }) ?? []
+    recent: scheduler?.recentRuns({ limit: 200 }) ?? []
   }));
   route("GET", /^\/accounts\/([^/]+)\/tasks$/, async (m) => {
     const row = store.resolve(decodeURIComponent(m[1]));
     if (!row) throw Object.assign(new Error("账号不存在"), { status: 404 });
-    return scheduler?.recentRuns({ accountId: row.id }) ?? [];
+    return scheduler?.recentRuns({ accountId: row.id, limit: 200 }) ?? [];
   });
   route("POST", /^\/scheduler\/tick$/, async () => {
     if (!scheduler) throw Object.assign(new Error("排程器未启用"), { status: 409 });

@@ -70,6 +70,8 @@
         <div class="row">
           <button id="tick" class="ghost">手动触发一轮</button>
           <button id="refresh-tasks" class="ghost">刷新</button>
+          <!-- 默认隐藏"啥也没干"的轮次:兑换每 5 分钟跑一次,不藏的话列表全是空轮 -->
+          <label class="field check"><input type="checkbox" id="show-quiet" /><span>显示无操作轮次</span></label>
         </div>
       </div>
       <p id="sched-status" class="hint"></p>
