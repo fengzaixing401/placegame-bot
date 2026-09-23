@@ -108,7 +108,9 @@ agent 用 `authorization: Bearer <令牌>`，浏览器用 WebUI 登录后的会�
 | POST | `/accounts/:id/collect` | ① 收挂机收益（自动处理冒险选项） |
 | POST | `/accounts/:id/inventory/decompose` | ② 背包一键分解 |
 | POST | `/accounts/:id/profession/settle` | ③ 副职结算 + 排任务 |
-| POST | `/accounts/:id/guild/daily` | ④ 公会兑换 + 捐献 + 分红 + 贡献奖励 |
+| POST | `/accounts/:id/guild/daily` | ④ 公会捐献 + 分红 + 贡献奖励 |
+| POST | `/accounts/:id/guild/redeem` | ④ 公会共享仓库兑换（独立任务，按秒级间隔跑） |
+| POST | `/accounts/:id/guild/redeem/reset` | ④ 清空兑换累计账本（只动本地计数） |
 | POST | `/accounts/:id/boss/map` | ⑤ 地图首领 |
 | POST | `/accounts/:id/boss/personal` | ⑤ 个人首领（名单为空则一个都不打） |
 | POST | `/accounts/:id/boss/world` | ⑤ 世界首领协作（窗口外自动跳过） |
@@ -436,6 +438,31 @@ WebUI 的等级输入框上限也跟着硬上限走，常量由后端随背包�
 另外 `guild.view` 里还有一个 `weeklySupplyRedemption` 的周上限 —— **那都是补给，不是兑换**。
 本程序没实现补给，所以这些限制不该出现在兑换面板上（踩过：把 `weeklySupplyRedemption`
 错当成兑换的周上限显示，实际兑换根本没这个限制）。
+
+### 兑换是独立任务，数量填「累计目标」
+
+兑换**不在公会日常里**，是独立任务 `guild.redeem`，按 `guild.redeemIntervalSeconds`
+（默认 300 秒）自己排。共享仓库先到先得，跑得越勤越容易抢到。
+
+**规则里的数量是累计目标，不是每轮数量。** 目标 2000 就每轮看库存继续换，累计到 2000 才停 ——
+不会每轮都换 2000。每轮的做法：
+
+1. `remaining = 目标 − 已累计`，为 0 就跳过
+2. `want = min(remaining, 当前库存)`，库存 0 也跳过（**不发注定失败的请求**）
+3. 按单次上限（游戏限 **999**）拆成多次调用
+4. **只把成功的次数累加进账本** —— 失败的不算，否则目标会被虚报成已达成；某次失败就停那一项，不空转
+
+「已兑换多少」存在本地表 `guild_redeem_totals` 里。**为什么不从兑换日志反推**：实测
+`/api/guild/redemption-logs` 只保留最近 120 条（`pagination.total=120`），算不出长期累计。
+
+面板上会显示每项「已兑换 X / 目标 Y」。配错了想归零，用「清空兑换进度」那个动作 ——
+它**只动本地计数，游戏里已经换到手的物品不受影响**。想再攒一轮通常不用它：目标是累计值，
+把目标数调大就接着往下算。
+
+排程 tick 是 60 秒一次，所以**间隔的实际最小粒度就是 60 秒**，填更小不会更快。
+
+游戏里还有一套「公会补给」（`/api/guild/supply/purchase`，收的是 `supplyKey`，
+另有每日限购与公会等级门槛）—— **本程序没有实现**，所以那些 key 填进兑换里不会生效。
 
 ### 贡献奖励（游戏里叫「进度奖励」）
 
