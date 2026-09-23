@@ -635,8 +635,15 @@ const { RedeemTotals: RT } = await import("../src/redeem-totals.mjs");
 const totalsProbe = new RT(db);
 check("累计账本按账号+物品记", totalsProbe.get(store.getByLabel("fzx401").id, "k1") === 5, String(totalsProbe.get(store.getByLabel("fzx401").id, "k1")));
 check("别的账号读不到这份进度", totalsProbe.get("别的账号", "k1") === 0);
-totalsProbe.reset(store.getByLabel("fzx401").id);
-check("重置后归零", totalsProbe.get(store.getByLabel("fzx401").id, "k1") === 0);
+// 重置走动作(面板上那个「清空兑换进度」),要报出"清掉之前是多少" —— 这动作不可撤销,
+// 日志是唯一凭据(游戏里的物品不受影响,清的只是本地计数)
+const rdReset = await service.run("fzx401", (api, row) => actions["guild.redeemReset"](api, row));
+check(
+  "重置动作清掉账本,并报出清空前的值",
+  rdReset.before.k1 === 5 && rdReset.after.k1 === undefined,
+  JSON.stringify(rdReset)
+);
+check("重置后确实归零", totalsProbe.get(store.getByLabel("fzx401").id, "k1") === 0);
 
 const bm = await service.run("fzx401", (api, row) => actions["boss.map"](api, row));
 const bmSkip = (key) => bm.skipped.find((s) => s.bossKey === key);

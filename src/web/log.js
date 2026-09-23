@@ -425,6 +425,20 @@
     errLines(d.errors, out);
   };
 
+  // 清空兑换累计账本。要把"清掉之前是多少"说清楚 —— 这个动作不可撤销,
+  // 日志是唯一的凭据(游戏那边的物品不受影响,清的只是本地计数)。
+  R.guildRedeemReset = function (d, out) {
+    if (!d) { out.push(L("服务端没有返回结果", "muted")); return; }
+    var before = (d.before && typeof d.before === "object") ? Object.keys(d.before) : [];
+    out.push(L("已清空兑换进度(" + (d.scope || "全部") + ")", "ok"));
+    if (before.length) {
+      out.push(L("清空前的累计:" + before.map(function (k) { return k + " " + N(d.before[k]); }).join("、"), "muted", 1));
+    } else {
+      out.push(L("清空前本来就没有记录", "muted", 1));
+    }
+    out.push(L("游戏里已经换到手的物品不受影响,下次兑换会从 0 重新累计", "muted", 1));
+  };
+
   // 公会共享仓库兑换(独立任务)。
   // 兑换已经移出公会日常,所以这里只说"这一轮实际换到了多少 / 为什么没换";
   // 累计进度(已兑换 / 目标)在面板上看,日志里不重复报。
@@ -683,6 +697,7 @@
     profession: "副职结算",
     guild: "公会日常",
     "guild.redeem": "公会兑换",
+    "guild.redeemReset": "清空兑换进度",
     "boss.personal": "个人首领",
     "boss.map": "地图首领",
     "boss.world": "世界首领",
@@ -696,6 +711,7 @@
   var RENDER_BY_JOB = {
     collect: "collect", inventory: "inventory", profession: "profession", guild: "guild",
     "guild.redeem": "guildRedeem",
+    "guild.redeemReset": "guildRedeemReset",
     "boss.personal": "boss", "boss.map": "boss", "boss.world": "boss",
     activity: "activity", dailyRun: "dailyRun"
   };

@@ -146,6 +146,13 @@ const ACTIONS = [
   { path: "profession/settle", job: "profession", label: "副职结算", panel: "profession" },
   { path: "guild/daily", job: "guild", label: "公会日常", panel: "guild" },
   {
+    path: "guild/redeem/reset",
+    job: "guild.redeemReset",
+    label: "清空兑换进度",
+    panel: null,
+    note: "把「已兑换」的累计计数清零,只动本地账本,游戏里已经换到手的物品不受影响。想再攒一轮通常不用点这个 —— 把上面的目标数调大就行(目标是累计值)。它只用于配错了想从头算。"
+  },
+  {
     path: "guild/redeem",
     job: "guild.redeem",
     label: "公会兑换",

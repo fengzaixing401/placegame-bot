@@ -397,6 +397,19 @@ check("公会兑换本轮没换成也说清楚是为什么", () => {
   assert.match(t, /已达目标 2000/);
 });
 
+check("清空兑换进度说清清掉了什么、以及不影响游戏数据", () => {
+  const t = text({ scope: "全部", before: { skill_page: 999, travel_ration: 1 }, after: {} }, "guild.redeemReset");
+  assert.match(t, /已清空兑换进度\(全部\)/);
+  assert.match(t, /清空前的累计:skill_page 999、travel_ration 1/);
+  assert.match(t, /游戏里已经换到手的物品不受影响/);
+  assert.doesNotMatch(t, /[{}]/);
+});
+
+check("清空前本来就没记录也说清楚", () => {
+  const t = text({ scope: "全部", before: {}, after: {} }, "guild.redeemReset");
+  assert.match(t, /清空前本来就没有记录/);
+});
+
 check("渲染器抛错时说明白,不吞结果", () => {
   const broken = { get mode() { throw new Error("炸了"); } };
   const t = text(broken, "inventory");

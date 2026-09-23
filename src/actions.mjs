@@ -74,6 +74,18 @@ export function buildActions(config, { redeemTotals = null } = {}) {
       });
     },
 
+    // 清空兑换累计账本。**只动本地计数,不碰游戏数据**(游戏那边已经换到手的物品不会回收)。
+    //
+    // 想"再攒一轮"通常不用它 —— 把目标数调大就行(目标是累计值,接着往下算)。
+    // 它只用于配错了想归零,或者换了角色/换了想攒的东西想从头算。
+    "guild.redeemReset": async (api, row, args = {}) => {
+      const itemKey = args?.itemKey ?? null;
+      const before = redeemTotals && row?.id ? redeemTotals.all(row.id) : {};
+      if (redeemTotals && row?.id) redeemTotals.reset(row.id, itemKey);
+      const after = redeemTotals && row?.id ? redeemTotals.all(row.id) : {};
+      return { scope: itemKey ?? "全部", before, after };
+    },
+
     // 三类首领三个动作,各自只碰自己那类 —— 页面上是三个面板,难度与名单都不共用。
     // types 写死成本类型:否则一个动作会顺带打掉另一类的次数。
     // 地图首领这一栏在游戏里是 12 个:接口 type=map 的 5 个,加上 type=world 的 7 个。

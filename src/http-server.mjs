@@ -202,6 +202,7 @@ export function createHttpServer({ config, service, store, settings, scheduler, 
   action("profession/settle", "profession", (b) => b);
   action("guild/daily", "guild", (b) => b);
   action("guild/redeem", "guild.redeem", (b) => b);
+  action("guild/redeem/reset", "guild.redeemReset", (b) => b);
   action("boss/map", "boss.map", (b) => b);
   action("boss/personal", "boss.personal", (b) => b);
   action("boss/world", "boss.world", (b) => b);
