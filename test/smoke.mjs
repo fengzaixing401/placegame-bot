@@ -41,6 +41,8 @@ let worldStatusRows = [
 ];
 // 世界首领行的协作闸门,用例要分别覆盖"可协作"与"场次已结束"
 let worldAssistBlocked = "";
+// 挑战失败注入(见假 /api/boss/challenge)。空串 = 正常成功
+let challengeFailure = "";
 // dynamic-view 连续失败几次。取首领名单就靠这个端点,它抖一下整轮首领任务就没了 ——
 // 真号上有一轮 boss.world 整个任务 status=error、result_json 为空,7 个首领一个都没打。
 let viewFailures = 0;
@@ -249,6 +251,10 @@ function fakeFetch(url, opts = {}) {
         ? reply({ predictedWin: false, chance: 30 })
         : reply({ predictedWin: true, chance: 95 });
     case "/api/boss/challenge":
+      // 失败注入:用来造"整轮一个都没打上"的场景。
+      // 实测踩过:2026-09-25 起地图首领连续 150 轮全废(18 个首领全报同一个错),
+      // 却一直显示 partial(黄色"有失败"),13 天没人注意到。
+      if (challengeFailure) return reply({ error: challengeFailure }, 400);
       // 真号形状:战斗详情 + 消耗 + 掉落,外加几百条 notices。
       // notices 正是真实响应里撑爆 result_json 的元凶(实测单次 700+ 条),
       // 这里照造,用来验证「落库前已裁掉它、明细不再被截断」。
@@ -783,6 +789,50 @@ check(
   JSON.stringify({ attempted: bpOverFree.attempted.length, free: bpOverFree.freeAttemptsLeft })
 );
 freeAttempts = 3;
+
+// ---- 材料加成:普通难度不支持,必须强制关掉 ----
+// 实测 2026-09-25 14:06 起,整轮 18 个地图首领全报「普通难度不支持材料加成。」,
+// 连续 150 轮、13 天一次都没打上(以前能用,是游戏改的)。
+// 服务端直接拒,所以这里强制关掉:**宁可少一个加成,也不能让整轮空转**。
+const boostFrom = calls.length;
+const bmBoost = await service.run("fzx401", (api, row) =>
+  actions["boss.map"](api, row, { rules: { difficulty: "normal", useMaterialBoost: true } })
+);
+const boostBodies = calls.slice(boostFrom).filter((c) => c.path === "/api/boss/preview").map((c) => c.body);
+check(
+  "普通难度下不发材料加成(服务端会直接拒)",
+  boostBodies.length > 0 && boostBodies.every((b) => b.useMaterialBoost === false),
+  JSON.stringify(boostBodies.slice(0, 2))
+);
+check(
+  "被忽略的材料加成会记一条提示,不静默",
+  (bmBoost.notes ?? []).some((n) => n.includes("材料加成")) && bmBoost.errors.length === 0,
+  JSON.stringify({ notes: bmBoost.notes, errors: bmBoost.errors })
+);
+
+// 只有普通档不支持;困难/噩梦照发。直接测判定函数 —— 走动作会受"首领本轮已被打过"影响
+check(
+  "材料加成只在非普通难度下可用",
+  bossFeature.materialBoostUsable("normal", { useMaterialBoost: true }) === false &&
+    bossFeature.materialBoostUsable("hard", { useMaterialBoost: true }) === true &&
+    bossFeature.materialBoostUsable("nightmare", { useMaterialBoost: true }) === true &&
+    bossFeature.materialBoostUsable("hard", { useMaterialBoost: false }) === false &&
+    bossFeature.materialBoostUsable("hard", {}) === false,
+  JSON.stringify(["normal", "hard", "nightmare"].map((d) => bossFeature.materialBoostUsable(d, { useMaterialBoost: true })))
+);
+
+// ---- 整轮全废要能被认出来(否则状态和"零星超时"一样是 partial)----
+challengeFailure = "普通难度不支持材料加成。";
+const bmAllFail = await service.run("fzx401", (api, row) => actions["boss.map"](api, row));
+challengeFailure = "";
+check(
+  "整轮一个都没打上时置 allFailed,只错零星几个则不置",
+  bmAllFail.attempted.length === 0 &&
+    bmAllFail.errors.length > 0 &&
+    bmAllFail.allFailed === true &&
+    bmBoost.allFailed === undefined,
+  JSON.stringify({ 全废: bmAllFail.allFailed, 正常: bmBoost.allFailed, errors: bmAllFail.errors.length })
+);
 
 // 世界首领:只参与协作讨伐 + 领奖,不主动挑战 —— 主攻会按困难/噩梦档扣门票,与本意相反。
 // 协作闸门在首领行的 assistBlockedReason / worldInstance 上,不在 world-status 接口。

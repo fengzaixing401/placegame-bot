@@ -544,6 +544,12 @@
   // 世界首领只有 assisted/skipped,没有 gate 也没有难度,那几行自然不出现。
   R.boss = function (d, out) {
     if (!d) { out.push(L("服务端没有返回首领结果", "muted")); return; }
+    // 整轮一个都没打上 —— 比"打了 16 个错 1 个"严重得多,顶格写出来。
+    // 这句话也是列表里那一行摘要(oneLine 取第一条)。
+    if (d.allFailed) {
+      out.push(L("整轮没有一次成功", "bad"));
+      out.push(L("下面每一条失败很可能是同一个原因,先看第一条", "muted", 1));
+    }
     var g = d.gate;
     if (g) {
       out.push(L("只打胜率不低于 " + N(g.minWinChance || 0) + "% 的" + (g.requirePredictedWin ? "、且预测必胜的" : "") +
@@ -627,6 +633,12 @@
       var m = d.claimed.message;
       if (typeof m === "string" && m) out.push(L("领奖:" + m, d.claimed.claimed ? "ok" : "muted"));
       else out.push(L(d.claimed.claimed ? "首领奖励已领取" : "没有可领的首领奖励", d.claimed.claimed ? "ok" : "muted"));
+    }
+
+    // 非故障提示(比如"材料加成被忽略了")。用 warn 色而不是 bad ——
+    // 它不是失败,但也不能静默,否则用户会以为那个设置生效了。
+    if (Array.isArray(d.notes)) {
+      d.notes.forEach(function (n) { out.push(L(n, "warn")); });
     }
     if (!att.rows.length && !asst.rows.length) {
       out.push(L("这次一个首领都没打", typeof d.skipped === "string" || take(d.skipped).rows.length ? "muted" : "warn"));

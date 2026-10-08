@@ -924,7 +924,14 @@ function bossCombat(r, opts) {
     ),
     "词缀会降裸档胜率(狂暴迫近 18%→16%),但带上技能后这点惩罚被吸收,所以奖励倍率是白拿的"
   );
-  const boost = fBool("使用材料强化", r.boss?.useMaterialBoost === true, "会消耗材料。实测对预测胜率没有影响");
+  // 普通难度不支持材料加成 —— 服务端会直接拒(实测 2026-09-25 起整轮 18 个首领全报
+  // 「普通难度不支持材料加成。」,连续 150 轮一个都没打上)。程序会强制关掉并发一条提示,
+  // 所以这里必须写明,免得用户以为开着就在生效。
+  const boost = fBool(
+    "使用材料强化",
+    r.boss?.useMaterialBoost === true,
+    "会消耗材料,对预测胜率没有影响。**普通难度不支持** —— 服务端会直接拒,程序会忽略它并发一条提示;只有困难/噩梦档才真正生效"
+  );
 
   return {
     nodes: [skillList.node, buff.node, affix.node, boost.node],

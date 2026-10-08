@@ -269,14 +269,22 @@ export class Scheduler {
       const result = await this.service.run(account.id, (client) => action(client, account));
       // 动作正常返回不等于成功:失败被收在 result.errors 里(见 collectRealFailures)。
       // 有真失败就不记 ok —— 记 partial 并把摘要写进 error 列,免得绿色盖住故障。
+      //
+      // 但 partial 和"整轮一个都没干成"是两回事:后者要记 error。
+      // 动作自己判定"零成功 + 有失败"就置 allFailed(见 runBosses / runWorldBoss)。
+      // 为什么非分不可:2026-09-25 起地图首领连续 150 轮、13 天一个都没打上,
+      // 却一直只显示 partial(黄色"有失败"),混在正常的零星超时里,一直没人注意到。
       const failures = collectRealFailures(result);
       if (failures.length > 0) {
         const summary = summarizeFailures(failures);
+        const allFailed = result?.allFailed === true;
         this.db
-          .prepare(`UPDATE job_runs SET status='partial', finished_at=?, result_json=?, error=? WHERE id=?`)
-          .run(nowIso(), this.#storableResult(result), summary, runId);
-        this.logger.error(`[scheduler] ${account.label}/${job.key} 有失败:${summary}`);
-        return { status: "partial", result };
+          .prepare(`UPDATE job_runs SET status=?, finished_at=?, result_json=?, error=? WHERE id=?`)
+          .run(allFailed ? "error" : "partial", nowIso(), this.#storableResult(result), summary, runId);
+        this.logger.error(
+          `[scheduler] ${account.label}/${job.key} ${allFailed ? "整轮没有一次成功" : "有失败"}:${summary}`
+        );
+        return { status: allFailed ? "error" : "partial", result };
       }
       this.db
         .prepare(`UPDATE job_runs SET status='ok', finished_at=?, result_json=? WHERE id=?`)

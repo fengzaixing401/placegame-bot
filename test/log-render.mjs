@@ -425,6 +425,23 @@ check("isQuiet:没声明的任务一律按有事算", () => {
   assert.equal(PGLog.isQuiet(undefined, "boss.world"), false);
 });
 
+check("整轮全废时顶格写出来,并提示先看第一条", () => {
+  // 实测踩过:2026-09-25 起地图首领连续 150 轮全废(18 个首领同一个错),
+  // 却只显示 partial(黄色"有失败"),混在正常的零星超时里,13 天没人注意到。
+  const t = text(
+    { allFailed: true, attempted: [], skipped: [], errors: [{ name: "梦魇古树", error: "普通难度不支持材料加成。" }] },
+    "boss.map"
+  );
+  assert.match(t, /整轮没有一次成功/);
+  assert.match(t, /先看第一条/);
+  assert.match(t, /普通难度不支持材料加成/);
+});
+
+check("材料加成被忽略时以提示色写出,不静默", () => {
+  const t = text({ attempted: [], skipped: [], errors: [], notes: ["「材料加成」已忽略:普通难度不支持"] }, "boss.map");
+  assert.match(t, /材料加成.*已忽略/);
+});
+
 check("渲染器抛错时说明白,不吞结果", () => {
   const broken = { get mode() { throw new Error("炸了"); } };
   const t = text(broken, "inventory");

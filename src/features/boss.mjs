@@ -189,17 +189,33 @@ export async function worldStatus(api) {
 // challenge 与 preview 共用同一组字段(CLI bossFields)。
 // 带 default 的字段 CLI 总会显式发送,这里保持一致以贴合服务端预期。
 function challengeBody(bossKey, rules = {}) {
+  const difficulty = rules.difficulty ?? "normal";
   const body = {
     bossKey,
-    difficulty: rules.difficulty ?? "normal",
+    difficulty,
     selectedSkillKeys: rules.selectedSkillKeys ?? [],
     buffKey: rules.buffKey || "none",
     affixKey: rules.affixKey || "none",
-    useMaterialBoost: rules.useMaterialBoost ?? false
+    // 普通难度不支持材料加成 —— 服务端直接拒。
+    // 实测 2026-09-25 14:06 起,整轮 18 个地图首领全报「普通难度不支持材料加成。」,
+    // **连续 150 轮、13 天一次都没打上**(以前能用,是游戏改的)。
+    // 这里强制关掉:**宁可少一个加成,也不能让整轮空转**。
+    useMaterialBoost: materialBoostUsable(difficulty, rules)
   };
   // targetSlot 无默认值,未设置时必须省略
   if (rules.targetSlot) body.targetSlot = rules.targetSlot;
   return body;
+}
+
+// 材料加成在当前难度下能不能用。普通难度不行(见上)。
+export function materialBoostUsable(difficulty, rules = {}) {
+  return difficulty !== "normal" && rules.useMaterialBoost === true;
+}
+
+// 用户开了材料加成、但当前难度不支持 —— 调用方据此记一条提示。
+// 不能静默忽略用户的设置,否则他会以为加成生效了。
+export function materialBoostDropped(rules = {}) {
+  return rules.useMaterialBoost === true && (rules.difficulty ?? "normal") === "normal";
 }
 
 export async function preview(api, bossKey, rules) {
@@ -495,6 +511,8 @@ export async function runBosses(api, { types, rules = {}, maxChallenges = 5, dry
     attempted: [],
     skipped: [],
     claimed: null,
+    // 非故障的提示(比如"材料加成被忽略了")。与 errors 分开 —— 它不该把任务染成 partial
+    notes: [],
     errors: []
   };
 
@@ -607,6 +625,19 @@ export async function runBosses(api, { types, rules = {}, maxChallenges = 5, dry
       out.errors.push({ step: "claimReward", error: err.message });
     }
   }
+
+  // 材料加成在普通难度下用不了(见 challengeBody)。用户开了就明确说一声 ——
+  // 静默忽略会让他以为加成生效了。放 notes 而不是 errors:这不是故障。
+  if (!dryRun && materialBoostDropped(rules)) {
+    out.notes.push("「材料加成」已忽略:普通难度不支持(服务端会直接拒)。想用加成得把难度调到困难/噩梦,或者把它关掉");
+  }
+
+  // 一个都没打上、却有失败 —— 这是"整轮空转",比"打了 16 个错 1 个"严重得多,
+  // 单独标出来让任务状态记成 error 而不是 partial。
+  // 为什么需要:2026-09-25 起地图首领连续 150 轮全废,却一直只显示 partial(黄色"有失败"),
+  // 藏了 13 天才被翻出来。
+  if (!dryRun && out.attempted.length === 0 && out.errors.length > 0) out.allFailed = true;
+
   return out;
 }
 
@@ -710,6 +741,9 @@ export async function runWorldBoss(api, { rules = {} } = {}) {
     if (!again) recovered.add(f.err);
   }
   if (recovered.size > 0) out.errors = out.errors.filter((e) => !recovered.has(e));
+
+  // 一个都没协作成功、却有失败 —— 整轮空转,标出来让状态记成 error(同 runBosses)
+  if (out.assisted.length === 0 && out.errors.length > 0) out.allFailed = true;
 
   // 一个都没协作成功就不必领奖,省一次请求
   if (out.assisted.length > 0) {
