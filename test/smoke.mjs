@@ -343,7 +343,7 @@ const { openDb } = await import("../src/db.mjs");
 const { SecretBox } = await import("../src/crypto.mjs");
 const { AccountStore } = await import("../src/accounts/store.mjs");
 const { AccountService } = await import("../src/accounts/service.mjs");
-const { Scheduler, zonedParts } = await import("../src/scheduler.mjs");
+const { Scheduler, zonedParts, summarizeFailures } = await import("../src/scheduler.mjs");
 const { createHttpServer } = await import("../src/http-server.mjs");
 const { SettingsStore } = await import("../src/settings.mjs");
 const { buildActions } = await import("../src/actions.mjs");
@@ -789,6 +789,37 @@ check(
   JSON.stringify({ attempted: bpOverFree.attempted.length, free: bpOverFree.freeAttemptsLeft })
 );
 freeAttempts = 3;
+
+// 误报修正:个人首领读 personalDifficulty,不能拿地图的 difficulty 去判材料加成。
+// 踩过 —— 地图档普通、个人档噩梦时,个人首领明明带着加成在打,却报"已忽略"。
+check(
+  "个人档是噩梦时不误报材料加成被忽略",
+  (
+    await runPersonal({ personalBosses: ["boss_pig"], personalDifficulty: "nightmare", useMaterialBoost: true })
+  ).notes.every((n) => !n.includes("材料加成")),
+  "个人档噩梦,不该报已忽略"
+);
+check(
+  "个人档是普通时才报材料加成被忽略",
+  (
+    await runPersonal({ personalBosses: ["boss_pig"], personalDifficulty: "normal", useMaterialBoost: true })
+  ).notes.some((n) => n.includes("材料加成")),
+  "个人档普通,该报已忽略"
+);
+
+// 失败摘要的**条数必须是真实失败数**,不是去重后的消息种类数。
+// 踩过:10-08 那轮世界首领协作 0 次、4 个首领全超时,摘要却说「1 项失败:请求超时。」——
+// 4 条同样的消息被去重成 1 条,看着像只错了一个。去重只该压消息种类,不该压条数。
+check(
+  "失败摘要报真实条数,不被去重压小",
+  summarizeFailures(["请求超时。", "请求超时。", "请求超时。", "请求超时。"]) === "4 项失败:请求超时。",
+  summarizeFailures(["请求超时。", "请求超时。", "请求超时。", "请求超时。"])
+);
+check(
+  "失败摘要仍会去重消息种类",
+  summarizeFailures(["超时", "超时", "场次已变化"]).startsWith("3 项失败:超时;场次已变化"),
+  summarizeFailures(["超时", "超时", "场次已变化"])
+);
 
 // ---- 材料加成:普通难度不支持,必须强制关掉 ----
 // 实测 2026-09-25 14:06 起,整轮 18 个地图首领全报「普通难度不支持材料加成。」,

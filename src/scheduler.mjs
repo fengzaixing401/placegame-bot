@@ -33,11 +33,15 @@ export function collectRealFailures(result, out = [], depth = 0) {
 }
 
 // 失败摘要写进 job_runs.error 列,长度上限与异常分支保持一致(500)。
-function summarizeFailures(messages) {
+//
+// **条数用真实失败数,不用去重后的消息数**:4 个首领同时超时会被去重成同一条消息,
+// 以前就报成「1 项失败:请求超时。」,看着像只错了一个 —— 实测 10-08 那轮协作 0 次、
+// 4 个首领全超时,摘要却说"1 项失败"。去重只用来压消息种类,不该压条数。
+export function summarizeFailures(messages) {
   const uniq = [...new Set(messages)];
   const head = uniq.slice(0, 3).join(";");
-  const more = uniq.length > 3 ? ` …等共 ${uniq.length} 项` : "";
-  return `${uniq.length} 项失败:${head}${more}`.slice(0, 500);
+  const more = uniq.length > 3 ? ` …等 ${uniq.length} 种原因` : "";
+  return `${messages.length} 项失败:${head}${more}`.slice(0, 500);
 }
 
 // 地图首领刷新后等多久才发起挑战。服务端自报 refreshText「地图首领每 2 小时刷新」,

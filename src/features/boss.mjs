@@ -212,10 +212,13 @@ export function materialBoostUsable(difficulty, rules = {}) {
   return difficulty !== "normal" && rules.useMaterialBoost === true;
 }
 
-// 用户开了材料加成、但当前难度不支持 —— 调用方据此记一条提示。
+// 用户开了材料加成、但**指定难度**不支持 —— 调用方据此记一条提示。
 // 不能静默忽略用户的设置,否则他会以为加成生效了。
-export function materialBoostDropped(rules = {}) {
-  return rules.useMaterialBoost === true && (rules.difficulty ?? "normal") === "normal";
+//
+// **必须传这一轮实际用的难度**:个人首领用的是 personalDifficulty,不能只看 rules.difficulty。
+// 踩过:地图档是普通、个人档是噩梦时,个人首领明明带着加成在打,却报"已忽略"(误报)。
+export function materialBoostDropped(difficulty, rules = {}) {
+  return rules.useMaterialBoost === true && !materialBoostUsable(difficulty, rules);
 }
 
 export async function preview(api, bossKey, rules) {
@@ -628,8 +631,17 @@ export async function runBosses(api, { types, rules = {}, maxChallenges = 5, dry
 
   // 材料加成在普通难度下用不了(见 challengeBody)。用户开了就明确说一声 ——
   // 静默忽略会让他以为加成生效了。放 notes 而不是 errors:这不是故障。
-  if (!dryRun && materialBoostDropped(rules)) {
-    out.notes.push("「材料加成」已忽略:普通难度不支持(服务端会直接拒)。想用加成得把难度调到困难/噩梦,或者把它关掉");
+  //
+  // 判定按**这一轮实际用到的难度**算,不能只看 rules.difficulty:
+  // 个人首领走 personalDifficulty。踩过 —— 地图档普通、个人档噩梦时,
+  // 个人首领明明带着加成打,却报"已忽略"。
+  if (!dryRun && rules.useMaterialBoost === true) {
+    const activeDifficulties = activeTypes.map((t) =>
+      t === BOSS_TYPE.PERSONAL ? (rules.personalDifficulty ?? "normal") : (rules.difficulty ?? "normal")
+    );
+    if (activeDifficulties.some((d) => materialBoostDropped(d, rules))) {
+      out.notes.push("「材料加成」已忽略:普通难度不支持(服务端会直接拒)。想用加成得把难度调到困难/噩梦,或者把它关掉");
+    }
   }
 
   // 一个都没打上、却有失败 —— 这是"整轮空转",比"打了 16 个错 1 个"严重得多,
