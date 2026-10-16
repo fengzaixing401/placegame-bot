@@ -102,8 +102,11 @@
   };
 
   // 兜底渲染用的字段中文名。只收真号上见过的键。
+  // score / rareScore 必须分得清:前者是战力评分(223~85881),后者是成色评分(53~95,
+  // 判极品/大极品/神装)。混在一起会出现"评分 14858"配"低于 86"的荒诞日志。
   var LABEL = {
-    name: "名称", quality: "品质", level: "等级", score: "评分", rareRank: "极品词条",
+    name: "名称", quality: "品质", level: "等级",
+    score: "战力评分", rareScore: "成色评分", rareRank: "极品词条",
     amount: "数量", count: "数量", exp: "经验", gold: "金币", killCount: "击杀",
     efficiency: "效率", validSeconds: "有效挂机", dropCount: "掉落件数",
     rareCoinFragments: "稀有币碎片", message: "说明", reason: "原因", error: "错误",
@@ -161,14 +164,19 @@
   };
 
   // 装备一行式描述。品质显示游戏内的中文档位名(映射表在 src/labels.mjs)。
+  // 成色分优先:判断一件装备值不值得留,看的是成色(极品/大极品/神装),不是战力。
   var eqName = function (r) {
     if (!r || typeof r !== "object") return String(r == null ? "未知装备" : r);
     var bits = [];
     if (r.quality) bits.push(PGL.quality(r.quality));
     if (typeof r.level === "number") bits.push(r.level + " 级");
-    if (typeof r.score === "number") bits.push("评分 " + N(r.score));
-    // rareRank 的取值本身就是「极品」,别再加前缀凑成"极品 极品"
-    if (r.rareRank) bits.push(String(r.rareRank).indexOf("极品") >= 0 ? String(r.rareRank) : "极品 " + r.rareRank);
+    if (typeof r.rareScore === "number") bits.push("成色 " + N(r.rareScore));
+    else if (typeof r.score === "number") bits.push("战力 " + N(r.score));
+    // rareRank 的真实取值就是完整档位名:极品 / 大极品 / 神装(2026-10-16 实测 231 件,
+    // 只有这三个值,零例外)。**原样输出,不加任何前缀** ——
+    // 早先的"不含『极品』二字就拼成『极品 X』"是拿它当词条名了,结果"神装"被拼成
+    // "极品 神装"、"大极品"侥幸逃过,纯属巧合而非正确。
+    if (r.rareRank) bits.push(String(r.rareRank));
     var head = r.name || r.equipmentId || "未知装备";
     return bits.length ? head + "(" + bits.join(" · ") + ")" : head;
   };
@@ -177,7 +185,8 @@
   var condLine = function (c) {
     if (!c || typeof c !== "object") return "条件:未设置";
     var bits = [];
-    if (typeof c.maxScore === "number") bits.push("评分低于 " + N(c.maxScore));
+    if (typeof c.maxRareScore === "number") bits.push("成色评分低于 " + N(c.maxRareScore));
+    if (typeof c.maxScore === "number") bits.push("战力评分低于 " + N(c.maxScore));
     if (typeof c.maxLevel === "number") bits.push("等级不高于 " + N(c.maxLevel));
     var q = asArr(c.qualities);
     // 存的是内部值(white/red/…),显示成游戏内档位名并按档位排序

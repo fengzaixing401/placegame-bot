@@ -24,15 +24,25 @@ const DEFAULTS = {
     },
     inventory: {
       enabled: true,
-      mode: "auto", // auto = 用服务端 auto-decompose 规则;explicit = 按下面 conditions 挑选
+      mode: "explicit", // auto = 用服务端 auto-decompose 规则;explicit = 按下面 conditions 挑选
       intervalHours: 11,
-      // explicit 模式的分解条件。默认全空 —— 空条件会被 hasNarrowingCondition 拦下,
-      // 所以不配就用不了 explicit,这比给一组"看起来合理"的默认阈值安全。
+      // explicit 模式的分解条件。
+      //
+      // 2026-10-16 起默认值按用户要求固化:**成色评分低于 86 的全拆**。
+      // 86 这个数不是拍的 —— 服务端 rareScore 实测:极品 53~69 / 大极品 70~93 /
+      // 神装 86.06~94.81,神装档的下沿正好压在 86。所以这条等价于"只留神装"。
+      //
+      // 注意 maxRareScore 读的是 rareScore(**成色**评分,判极品/大极品/神装),
+      // 不是 score(**战力**评分,实测 223~85881)。两者差了三个数量级,
+      // 写错就会得到"没有一件装备符合条件"。
       conditions: {
-        maxScore: null, // 评分低于此值才拆(null = 不看评分)
-        maxLevel: null, // 装备等级不高于此值才拆
+        maxRareScore: 86, // 成色评分低于此值才拆(null = 不看成色)
+        maxScore: null, // 战力评分低于此值才拆(null = 不看战力)
+        maxLevel: null, // 装备等级不高于此值才拆(null = 不看等级)
         qualities: [], // 可分解品质白名单,空 = 不按品质筛
-        keepRareRank: true, // 带极品词条的一律保留
+        // 必须显式 false:成色档位(极品/大极品/神装)几乎人人都有,
+        // 开着 true 会把上面的成色条件整个架空(全被"保留极品词条"拦下)。
+        keepRareRank: false,
         keepAttrs: [] // 命中这些属性名就保留
       }
     },

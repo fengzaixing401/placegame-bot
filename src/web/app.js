@@ -565,49 +565,61 @@ function fStatus(titleText, lines, hint) {
 function panelInventory(r, opts) {
   const c = r.inventory?.conditions ?? {};
   const eq = opts?.equipment ?? {};
-  // 硬上限由后端随背包摘要一起下发,前端不另存一份常量 —— 两边各写一个 160 迟早漂移
-  const hardMaxLevel = Number.isFinite(eq.hardMaxLevel) ? eq.hardMaxLevel : null;
   const mode = fSelect(
     "模式",
     r.inventory?.mode,
     [["auto", "auto — 用游戏自带的自动分解规则"], ["explicit", "explicit — 按下面条件挑选"]],
     "auto 由游戏决定拆哪些,本程序无从预览;explicit 才看下面的条件"
   );
-  const maxScore = fNum("评分低于", c.maxScore, { min: 0, step: 1, hint: "留空 = 不看评分" });
+  // 成色评分(rareScore)是判断极品/大极品/神装的依据,和战力评分(score)完全是两码事。
+  // 实测:战力评分 223~85881,成色评分 53~95,神装档下沿正好 86。
+  const rareScore = eq.rareScore ?? null;
+  const rsHint = rareScore
+    ? `成色评分(判极品/大极品/神装),本号实际 ${rareScore.min} ~ ${rareScore.max}。留空 = 不看成色`
+    : "成色评分(判极品/大极品/神装)。留空 = 不看成色";
+  const maxRareScore = fNum("成色评分低于", c.maxRareScore, {
+    min: 0,
+    max: rareScore ? Math.ceil(rareScore.max) : 100,
+    step: 0.01,
+    hint: rsHint
+  });
+  const maxScore = fNum("战力评分低于", c.maxScore, {
+    min: 0,
+    step: 1,
+    hint: "战力评分,与上面的成色评分不是一个东西。留空 = 不看战力"
+  });
   const maxLevel = fNum("装备等级不高于", c.maxLevel, {
     min: 0,
-    max: hardMaxLevel ?? 999,
     step: 1,
-    hint: hardMaxLevel
-      ? `留空 = 不看等级。填得再大也不会超过 ${hardMaxLevel} —— 那批在硬保护里已经拦下了`
-      : "留空 = 不看等级"
+    hint: "留空 = 不看等级"
   });
   const qualities = fQualities(c.qualities, eq.qualities);
-  const keepRare = fBool("保留极品词条", c.keepRareRank !== false, "带极品词条的一律不拆");
+  // 默认关:成色档位几乎人人都有,开着会把全部装备都保护下来,评分条件就筛不动了。
+  const keepRare = fBool("保留极品词条", c.keepRareRank === true, "带成色档位(极品/大极品/神装)的一律不拆。开着会让下面的成色条件失效");
   const keepAttrs = fAttrs(c.keepAttrs, eq.attrKeys);
 
-  const fields = [mode, maxScore, maxLevel, qualities, keepRare, keepAttrs];
+  const fields = [mode, maxRareScore, maxScore, maxLevel, qualities, keepRare, keepAttrs];
   const stat =
     typeof eq.disposable === "number"
       ? `背包里可处理 ${eq.disposable} 件(共 ${eq.total} 件)。只看背包内、未锁定、未穿戴、未上架的装备。`
       : "只处理背包内、未锁定、未穿戴、未上架的装备。";
-  // 硬保护必须写在面板上:否则用户会以为"把等级上限调大"就能拆掉高级装备
-  const hardNote = hardMaxLevel
-    ? `硬保护(上面条件改不动):当前穿戴中的装备、等级高于 ${hardMaxLevel} 的装备、已上锁的装备一律不分解。等级读不到的也按不分解处理。`
-    : null;
+  // 硬保护写在面板上:免得用户以为"条件配宽了就能拆身上的装备"
+  const hardNote = "硬保护(条件改不动):当前穿戴中的装备、已上锁的装备一律不分解。";
 
   return {
     node: el(
       "div",
       { className: "op-form" },
       el("p", { className: "hint", textContent: stat }),
-      ...(hardNote ? [el("p", { className: "hint warn", textContent: hardNote })] : []),
+      el("p", { className: "hint warn", textContent: hardNote }),
       ...fields.map((f) => f.node)
     ),
     read: () => {
       const conditions = { keepRareRank: keepRare.read() };
+      const rs = maxRareScore.read();
       const s = maxScore.read();
       const lv = maxLevel.read();
+      if (rs !== null) conditions.maxRareScore = rs;
       if (s !== null) conditions.maxScore = s;
       if (lv !== null) conditions.maxLevel = lv;
       conditions.qualities = qualities.read();
@@ -617,18 +629,21 @@ function panelInventory(r, opts) {
     // explicit 模式下一个收紧条件都没有,后端会拒;提前说清楚,别让人对着报错猜
     validate: () => {
       if (mode.read() !== "explicit") return null;
-      const c2 = { maxScore: maxScore.read(), maxLevel: maxLevel.read(), qualities: qualities.read() };
-      const narrowed = c2.maxScore !== null || c2.maxLevel !== null || c2.qualities.length > 0;
-      return narrowed ? null : "explicit 模式至少要设一个收紧条件(评分、等级或品质),否则会拆光整个背包,后端会直接拒绝。";
+      const narrowed =
+        maxRareScore.read() !== null || maxScore.read() !== null ||
+        maxLevel.read() !== null || qualities.read().length > 0;
+      return narrowed ? null : "explicit 模式至少要设一个收紧条件(成色评分、战力评分、等级或品质),否则会拆光整个背包,后端会直接拒绝。";
     },
     // 存为规则时写回 inventory 分区
     toRules: () => ({ inventory: { mode: mode.read(), conditions: readConditions() } })
   };
 
   function readConditions() {
+    const rs = maxRareScore.read();
     const s = maxScore.read();
     const lv = maxLevel.read();
     return {
+      maxRareScore: rs === null ? null : rs,
       maxScore: s === null ? null : s,
       maxLevel: lv === null ? null : lv,
       qualities: qualities.read(),

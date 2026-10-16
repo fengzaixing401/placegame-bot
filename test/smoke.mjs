@@ -153,23 +153,28 @@ function fakeFetch(url, opts = {}) {
       });
 
     case "/api/equipment/list":
-      // 真实装备行带 level/score。e5~e8 专供硬保护用例,品质都用 rare,
-      // 免得混进既有那几条按 common 筛的断言里;由 equipmentHardRows 控制有无。
+      // 真实装备行带 level/score/rareScore。e5~e8 专供硬保护与成色评分用例,
+      // 品质都用 rare,免得混进既有那几条按 common 筛的断言里;由 equipmentHardRows 控制有无。
+      //
+      // 【2026-10-16】等级硬上限已移除,所以 e5/e8 不再是"高等级受保护"的样本,
+      // 改成成色评分的样本:
+      //   e5 = 成色 95(神装档,>= 86 → 留)
+      //   e8 = 没带 rareScore 字段(设了成色条件时必须留,判不了就不拆)
       return reply({
         equipment: [
-          { id: "e1", status: "in_bag", locked: false, quality: "common", level: 40, score: 120 },
-          { id: "e2", status: "in_bag", locked: true, quality: "common", level: 40, score: 130 },
-          { id: "e3", status: "equipped", locked: false, quality: "rare", level: 55, score: 300 },
-          { id: "e4", status: "in_warehouse", locked: false, quality: "common", level: 40, score: 110 },
+          { id: "e1", status: "in_bag", locked: false, quality: "common", level: 40, score: 120, rareScore: 60 },
+          { id: "e2", status: "in_bag", locked: true, quality: "common", level: 40, score: 130, rareScore: 55 },
+          { id: "e3", status: "equipped", locked: false, quality: "rare", level: 55, score: 300, rareScore: 88 },
+          { id: "e4", status: "in_warehouse", locked: false, quality: "common", level: 40, score: 110, rareScore: 70 },
           ...(equipmentHardRows
             ? [
-                // 等级高于硬上限 160 —— 无论条件怎么配都不许拆
-                { id: "e5", status: "in_bag", locked: false, quality: "rare", level: 200, score: 900 },
-                // 正好 160:不高于上限,可拆(边界值,防"误用 >= 判定"把 160 也保护掉)
-                { id: "e6", status: "in_bag", locked: false, quality: "rare", level: 160, score: 800 },
+                // 成色 95,神装档。等级 200 不再有任何特殊含义 —— 只是普通字段
+                { id: "e5", status: "in_bag", locked: false, quality: "rare", level: 200, score: 900, rareScore: 95, rareRank: "神装" },
+                // 正好 86 边界:>= 86 要留(防"误用 > 判定"把 86 也拆掉)
+                { id: "e6", status: "in_bag", locked: false, quality: "rare", level: 160, score: 800, rareScore: 86, rareRank: "神装" },
                 // status 说在背包、equipped 布尔说在穿 —— 两个口径不一致,必须按"在穿"处理
-                { id: "e7", status: "in_bag", locked: false, quality: "rare", equipped: true, level: 30, score: 100 },
-                // 等级字段缺失:证明不了不高于 160,按受保护处理
+                { id: "e7", status: "in_bag", locked: false, quality: "rare", equipped: true, level: 30, score: 100, rareScore: 90 },
+                // 缺 rareScore:设了成色条件时证明不了它够低,按受保护处理
                 { id: "e8", status: "in_bag", locked: false, quality: "rare", score: 100 }
               ]
             : [])
@@ -522,27 +527,100 @@ try {
 }
 check("全 null 条件被拦下", /至少要设一个收紧条件/.test(nullOnlyGuard ?? ""), String(nullOnlyGuard));
 
-// ---- 硬保护:穿戴中 + 等级 > 160。这两条是运维约束,不受任何条件配置影响 ----
-// 用 maxLevel: 999 做收紧条件,意思是"用户把等级上限放到最宽" —— 即便如此,
-// 穿戴中的、高于 160 的、等级读不到的,一个都不许出现在 equipmentIds 里。
+// ---- 硬保护:只剩"穿戴中"和"已上锁"两条 ----
+// 【2026-10-16】等级硬上限已移除。原先这里断言"条件放宽到 999 也拆不动等级>160",
+// 现在等级不再有不可放宽的天花板 —— 高等级装备能否拆,只由用户填的 maxLevel 决定。
+// 保留的硬保护只有两条:当前穿戴中(status/equipped 两个口径)、已上锁。
 const hardCond = await service.run("fzx401", (api, row) =>
-  actions.inventory(api, row, { mode: "explicit", conditions: { maxLevel: 999 } })
+  actions.inventory(api, row, { mode: "explicit", conditions: { maxLevel: 9999 } })
 );
 const hardIds = hardCond.equipmentIds ?? [];
 const hardKept = new Map(hardCond.kept.map((k) => [k.equipmentId, k.reason]));
-check("条件放宽到 999 也拆不动等级>160(e5)", !hardIds.includes("e5"), JSON.stringify(hardIds));
-check("e5 的保留原因是等级", /高于 160/.test(hardKept.get("e5") ?? ""), String(hardKept.get("e5")));
-check("正好 160 可以拆(e6,边界不误伤)", hardIds.includes("e6"), JSON.stringify(hardIds));
+check("等级不再是硬保护:200 级装备在 maxLevel=9999 下可拆(e5)", hardIds.includes("e5"), JSON.stringify(hardIds));
+check("160 级装备可拆(e6)", hardIds.includes("e6"), JSON.stringify(hardIds));
 check("status 穿戴中的不拆(e3)", !hardIds.includes("e3"), JSON.stringify(hardIds));
 check("equipped 布尔为真也不拆(e7)", !hardIds.includes("e7"), JSON.stringify(hardIds));
 check("e7 的保留原因是穿戴", /穿戴/.test(hardKept.get("e7") ?? ""), String(hardKept.get("e7")));
-check("等级读不到的不拆(e8)", !hardIds.includes("e8"), JSON.stringify(hardIds));
-check("e8 的保留原因是读不到等级", /读不到等级/.test(hardKept.get("e8") ?? ""), String(hardKept.get("e8")));
+check("已上锁的不拆(e2)", !hardIds.includes("e2"), JSON.stringify(hardIds));
+check("e2 的保留原因是上锁", /上锁/.test(hardKept.get("e2") ?? ""), String(hardKept.get("e2")));
+
+// ---- 成色评分(rareScore):判极品/大极品/神装的依据 ----
+// 必须与战力评分(score)分开。实测:rareScore 53~95,score 223~85881,
+// 早期把 maxScore 读成 row.score 导致"成色低于 86"永远匹配不到任何装备。
+const rareCond = await service.run("fzx401", (api, row) =>
+  actions.inventory(api, row, { mode: "explicit", conditions: { maxRareScore: 86, keepRareRank: false } })
+);
+const rareIds = rareCond.equipmentIds ?? [];
+const rareKept = new Map(rareCond.kept.map((k) => [k.equipmentId, k.reason]));
+check("成色低于 86 的拆掉(e1 rareScore=60)", rareIds.includes("e1"), JSON.stringify(rareIds));
+check(
+  "成色不低于 86 的留下(e5 rareScore=95)",
+  !rareIds.includes("e5"),
+  JSON.stringify(rareIds)
+);
+check(
+  "e5 的保留原因写成色评分",
+  /成色评分 95 不低于 86/.test(rareKept.get("e5") ?? ""),
+  String(rareKept.get("e5"))
+);
+check(
+  "正好 86 留下(e6,边界不误伤)",
+  !rareIds.includes("e6"),
+  JSON.stringify(rareIds)
+);
+check(
+  "e6 的保留原因写成色评分 86",
+  /成色评分 86 不低于 86/.test(rareKept.get("e6") ?? ""),
+  String(rareKept.get("e6"))
+);
+check("缺 rareScore 的留下(e8)", !rareIds.includes("e8"), JSON.stringify(rareIds));
+check(
+  "e8 的保留原因是读不到成色评分",
+  /读不到成色评分/.test(rareKept.get("e8") ?? ""),
+  String(rareKept.get("e8"))
+);
+
+// 成色评分与战力评分不能串台:给一个极低的战力阈值,成色条件不该被它影响
+const combatCond = await service.run("fzx401", (api, row) =>
+  actions.inventory(api, row, { mode: "explicit", conditions: { maxScore: 115, keepRareRank: false } })
+);
+const combatIds = combatCond.equipmentIds ?? [];
+// 夹具里只有 e1 是"在背包 + 未锁 + 未穿"的:score=120 不低于 115 → 留;
+// e4 虽然 score=110 够低,但它在仓库(in_warehouse),根本进不了候选。
+// 所以这条用"e1 被 score 条件留下"来证明阈值读的是 score、且不是 rareScore。
+check(
+  "战力阈值读的是 score 不是 rareScore(e1 score=120 ≥ 115 被留)",
+  !combatIds.includes("e1"),
+  JSON.stringify(combatIds)
+);
+check(
+  "战力条件的保留原因写战力评分",
+  /战力评分 120 不低于 115/.test(new Map(combatCond.kept.map((k) => [k.equipmentId, k.reason])).get("e1") ?? ""),
+  String(new Map(combatCond.kept.map((k) => [k.equipmentId, k.reason])).get("e1"))
+);
+// 反证:同一件 e1,用成色条件(60 < 86)就该被拆 —— 说明两个条件各读各的字段
+check("同一件 e1 用成色条件判就该拆(rareScore=60)", rareIds.includes("e1"), JSON.stringify(rareIds));
+
+// keepRareRank 默认关闭。开着时带 rareRank 的会被保护下来,把成色条件整个架空
+const rareProtected = await service.run("fzx401", (api, row) =>
+  actions.inventory(api, row, { mode: "explicit", conditions: { maxRareScore: 86, keepRareRank: true } })
+);
+check(
+  "keepRareRank=true 时带档位的装备额外被保护(e6 有 rareRank)",
+  !(rareProtected.equipmentIds ?? []).includes("e6"),
+  JSON.stringify(rareProtected.equipmentIds)
+);
+check(
+  "默认(不传 keepRareRank)不保护档位,e6 仍按成色判定",
+  rareIds.includes("e1"),
+  JSON.stringify(rareIds)
+);
 
 // 点名路径:调用方直接给 id、不套 conditions。它能从 REST 直接触达,
 // 绕得过硬保护就是个"把身上装备交出去"的后门。受保护的 id 必须被拒。
+// 【2026-10-16】e5 现在是可拆的(等级不再受保护),所以换 e2(已上锁)做受保护样本。
 const pointed = await service.run("fzx401", (api, row) =>
-  actions.inventory(api, row, { equipmentIds: ["e1", "e3", "e5", "e7"] })
+  actions.inventory(api, row, { equipmentIds: ["e1", "e3", "e2", "e7"] })
 );
 check(
   "点名路径只放行 e1",
@@ -558,7 +636,7 @@ check(
 
 // 全被拒时一个请求都不发:不为"拆 0 件"去打一次写接口
 const allRefused = await service.run("fzx401", (api, row) =>
-  actions.inventory(api, row, { equipmentIds: ["e3", "e5", "e7", "e8"] })
+  actions.inventory(api, row, { equipmentIds: ["e3", "e2", "e7"] })
 );
 check(
   "点名全被拒时不发请求",
@@ -576,15 +654,10 @@ check(
   JSON.stringify(ghost.refused)
 );
 
-// auto 拆哪些由游戏侧规则决定,本程序看不到那份规则,没法逐件预览。
-// 背包里存在受保护装备时必须拒绝,而不是赌游戏不会拆它。
-let autoGuard = null;
-try {
-  await service.run("fzx401", (api, row) => actions.inventory(api, row, { mode: "auto" }));
-} catch (err) {
-  autoGuard = err.message;
-}
-check("auto 遇到受保护装备时拒绝执行", /无法保证/.test(autoGuard ?? ""), String(autoGuard));
+// auto 模式不再有等级前置检查(硬上限移除后失去依据,且实测全部装备都是 200 级)。
+// 它直接交给游戏侧规则执行 —— 这条断言固化的就是"不再拒绝"。
+const autoRun = await service.run("fzx401", (api, row) => actions.inventory(api, row, { mode: "auto" }));
+check("auto 模式直接执行,不再因装备等级拒绝", autoRun.mode === "auto", JSON.stringify(autoRun));
 
 const prof = await service.run("fzx401", (api, row) => actions.profession(api, row));
 check("副职 settle+select+enqueue", prof.settled && prof.selected?.selected === "fishing" && prof.enqueued[0]?.count === 5);
@@ -1992,14 +2065,18 @@ check("方法不允许 405", (await call("PUT", "/accounts")).status === 405);
 check("未知端点 404", (await call("GET", "/nope")).status === 404);
 const restCollect = await call("POST", "/accounts/fzx401/collect", { body: {} });
 check("REST 触发收益", restCollect.status === 200 && restCollect.json.data.adventureResolved === true);
-// daily-run 会按默认规则跑一遍分解。默认 mode 是 auto,而 auto 现在会先预检背包 ——
-// 夹具里那几行受保护装备会让整轮卡住,所以这里先把它们摘掉,
-// 让这一条专注验证"整轮串起来能跑通",硬保护本身由上面的用例覆盖。
+// daily-run 会按默认规则跑一遍分解。默认 mode 现在是 explicit(成色评分低于 86),
+// 不再有"auto 预检背包"那一层。这里仍先摘掉受保护装备行,让这一条专注验证
+// "整轮串起来能跑通";硬保护与成色判定本身由上面的用例覆盖。
 equipmentHardRows = false;
 const dr = await call("POST", "/accounts/fzx401/daily-run", { body: {} });
 check("一键日常各步骤", Object.keys(dr.json.data.ran).length === 6, JSON.stringify(Object.keys(dr.json.data.ran)));
 check("一键日常无错", dr.json.data.errors.length === 0, JSON.stringify(dr.json.data.errors));
-check("默认走服务端 auto 分解", dr.json.data.ran.inventory?.mode === "auto", JSON.stringify(dr.json.data.ran.inventory));
+check(
+  "默认走 explicit 成色分解(低于 86)",
+  dr.json.data.ran.inventory?.mode === "explicit" && dr.json.data.ran.inventory?.conditions?.maxRareScore === 86,
+  JSON.stringify(dr.json.data.ran.inventory)
+);
 const dis = await call("POST", "/accounts/fzx401/disable", { body: { reason: "维护" } });
 check("停用账号", dis.json.data.enabled === false);
 check("停用后动作 409", (await call("POST", "/accounts/fzx401/collect", { body: {} })).status === 409);

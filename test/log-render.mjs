@@ -171,15 +171,45 @@ check("inventory explicit 逐件给出拆与留的原因", () => {
     result: null
   }, "inventory");
   assert.match(t, /仅预览,没有真的分解/);
-  assert.match(t, /评分低于 3,000/);
+  // 战力评分条件与成色评分条件必须能分辨 —— 两者差三个数量级,混着写会误导
+  assert.match(t, /战力评分低于 3,000/);
   // 品质一律显示游戏内档位名。条件行还要按档位从低到高排,不跟着入参顺序 ——
   // 规则可能是 REST/agent 存进来的,顺序任意。
   assert.match(t, /品质 优秀\/精良/);
-  assert.match(t, /将分解 精良短剑\(精良 · 60 级 · 评分 1,200\)/);
+  assert.match(t, /将分解 精良短剑\(精良 · 60 级 · 战力 1,200\)/);
   assert.match(t, /传说龙纹刃.*极品词条/);
   assert.doesNotMatch(t, /极品 极品品/);
   // 英文色名一个都不该露出来
   assert.doesNotMatch(t, /blue|red|green/);
+});
+
+// 成色评分(rareScore)是判极品/大极品/神装的依据,与战力评分(score)不是一个东西。
+// 这条同时钉住三件事:条件行写成色评分、装备行显示成色而非战力、档位名原样输出。
+check("inventory 成色评分条件与成色值都能正确渲染", () => {
+  const t = text({
+    mode: "explicit", dryRun: false,
+    conditions: { maxRareScore: 86, keepRareRank: false },
+    scanned: 231, matched: 2, keptCount: 1,
+    targets: [
+      { equipmentId: "eq_a", name: "神话永夜断罪", quality: "gold", level: 200, score: 14858, rareScore: 79.2, rareRank: "大极品" },
+      { equipmentId: "eq_b", name: "神话永夜断罪", quality: "gold", level: 200, score: 14687, rareScore: 84.72, rareRank: "大极品" }
+    ],
+    kept: [
+      { equipmentId: "eq_c", name: "神话永夜断罪", quality: "gold", level: 200, score: 15491, rareScore: 94.14, rareRank: "神装", reason: "成色评分 94.14 不低于 86" }
+    ],
+    result: { removedEquipmentIds: ["eq_a", "eq_b"], gained: { gold: 20 } }
+  }, "inventory");
+  assert.match(t, /成色评分低于 86/);
+  // 有 rareScore 时优先显示成色,而不是更唬人的战力评分(dryRun=false → "分解"不带"将")
+  assert.match(t, /分解 神话永夜断罪\(神话 · 200 级 · 成色 79\.2 · 大极品\)/);
+  assert.match(t, /成色评分 94\.14 不低于 86/);
+  assert.match(t, /已分解装备 2 件/);
+  // rareRank 是完整档位名,原样输出 —— 不许拼成"极品 神装"
+  assert.match(t, /成色 94\.14 · 神装/);
+  assert.doesNotMatch(t, /极品 神装/);
+  assert.doesNotMatch(t, /极品 大极品/);
+  // 别把战力评分也显成"成色"
+  assert.doesNotMatch(t, /成色 14,858/);
 });
 
 check("profession 用响应里的中文动作名,不用 key", () => {
