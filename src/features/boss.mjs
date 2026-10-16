@@ -233,11 +233,14 @@ export async function challenge(api, bossKey, rules) {
 
 // 协作不扣门票也不扣挑战次数(响应里没有 cost 字段),重发最坏只是多提交一次伤害,
 // 所以这里显式开退避重试 —— 场次只开一小时,超时丢掉就等下一场了。
-export async function assist(api, bossKey, { retries = 2 } = {}) {
+//
+// timeoutMs 默认交给客户端(15 秒)。世界首领在 10:00 场(日重置时段)会调成更短的值:
+// 服务端过载时等满 15 秒纯属浪费 —— 场次只开一小时,快速失败后**重试**比慢等更有机会打上。
+export async function assist(api, bossKey, { retries = 2, timeoutMs } = {}) {
   if (!bossKey) throw new Error("assist 需要 bossKey");
   // 协作不扣门票也不扣次数(只有成功的协作才推进场次进度),所以重发安全 ——
   // 这也是全项目唯一默认带重试的 POST。补跑那一轮会传更小的 retries。
-  return api.post("/api/boss/assist", { bossKey }, { retries });
+  return api.post("/api/boss/assist", { bossKey }, { retries, ...(timeoutMs ? { timeoutMs } : {}) });
 }
 
 export async function claimReward(api) {
@@ -665,12 +668,12 @@ export async function runBosses(api, { types, rules = {}, maxChallenges = 5, dry
 //
 // 返回值:失败时返回那条错误记录(调用方拿它去重/撤回),成功或正常收手返回 null。
 // 补跑那一轮传 `record: false` —— 它不该再往 errors 里堆一条,失败时原来那条还在。
-async function assistUntilExhausted(api, label, out, { retries = 2, record = true } = {}) {
+async function assistUntilExhausted(api, label, out, { retries = 2, record = true, timeoutMs } = {}) {
   let lastLeft = null;
   for (let round = 1; ; round += 1) {
     let result;
     try {
-      result = await assist(api, label.bossKey, { retries });
+      result = await assist(api, label.bossKey, { retries, timeoutMs });
     } catch (err) {
       const entry = { ...label, round, error: err.message };
       if (record) out.errors.push(entry);
@@ -704,8 +707,36 @@ async function assistUntilExhausted(api, label, out, { retries = 2, record = tru
 // ⑤ 世界首领:只参与协作讨伐 + 领奖,不主动挑战。
 // 世界首领是全服共同消耗一个血条的场次战,个人主攻既无难度可选也无"胜率"可言;
 // 服务端虽然也接受 challenge,但那会按困难/噩梦档扣掉门票,与"只参与协作"的本意相反。
-export async function runWorldBoss(api, { rules = {} } = {}) {
-  const out = { status: null, assisted: [], skipped: [], claimed: null, errors: [] };
+//
+// **整轮时间预算(budgetMs)**:场次只开一小时,而 10:00 场(日重置时段)服务端会持续过载 ——
+// 实测 2026-10-16 起,单次请求要等满 15 秒超时才放弃、退避重试 2 次,一个首领最坏 ~48 秒,
+// 21 个首领根本跑不完窗口,结果「协作 7 / 错 9」。这不是次数不够,是时间不够。
+// 所以主循环与补跑都盯着剩余额度:快到点了就收尾并**显式记一笔**,
+// 而不是硬撑到窗口关闭、连"为什么没打完"都看不出来。
+//
+// budgetMs 由排程按"窗口还剩多少分钟"算好传入;直接调用(如测试)不传 = 不设预算。
+// 留最后一段给补跑与领奖 —— 否则主循环正好把时间用光,补跑一步都轮不到,
+// 而补跑恰恰是 10:00 场唯一能把漏掉的协作捡回来的机会。
+const WORLD_PREPARE_BUDGET_MS = 2 * 60 * 1000;
+
+// 世界首领协作的超时(毫秒)。客户端默认 15 秒 —— 在 10:00 场服务端过载时,
+// 等满 15 秒再退避重试 2 次,单个首领最坏 48 秒,21 个首领耗掉 16 分钟以上,
+// 而一轮只有不到 25 分钟(半小时窗口减掉准备与补跑)。
+// 缩短到 7 秒:单次最坏 (7+0.8)+(7+2)+7 ≈ 24 秒,同样时间能多试近一倍的首领。
+// 正常时 assist 只要 2-5 秒(实测),7 秒对健康请求毫无影响。
+const WORLD_ASSIST_TIMEOUT_MS = 7000;
+
+// 整轮还剩多少时间可用。budgetMs 是**本轮可用的总时长**(排程按窗口剩余算出来的),
+// startedAt 是本轮起始时刻。不传 budgetMs = 不设预算,返回 Infinity(行为与从前一致)。
+export function remainingBudget(budgetMs, startedAt = Date.now(), now = Date.now()) {
+  if (!Number.isFinite(budgetMs)) return Infinity;
+  return budgetMs - (now - startedAt);
+}
+
+export async function runWorldBoss(api, { rules = {}, budgetMs = null } = {}) {
+  const startAt = Date.now();
+  const left = () => remainingBudget(budgetMs, startAt);
+  const out = { status: null, assisted: [], skipped: [], claimed: null, errors: [], notes: [] };
   out.status = await worldStatus(api)
     .then((list) => digestWorldStatus(list))
     .catch((err) => {
@@ -721,6 +752,8 @@ export async function runWorldBoss(api, { rules = {} } = {}) {
   const wanted = asSet(rules.worldBosses);
   // 主循环里失败的首领攒下来,整轮末尾补一次(见下)
   const failed = [];
+  // 时间预算用掉之后还没轮到的候选,记下来让日志说得清"我们不是漏了它们,是没时间了"
+  const notRun = [];
   for (const boss of bosses) {
     const key = pickKey(boss);
     // 名单为空表示"全部参与";点了名就只协作名单里那几个
@@ -733,8 +766,19 @@ export async function runWorldBoss(api, { rules = {} } = {}) {
       out.skipped.push({ ...label, reason, refreshText: boss.refreshText ?? null });
       continue;
     }
-    const err = await assistUntilExhausted(api, label, out);
+
+    // 预算见底就停手,剩下的记成"时间不够"而不是"失败" —— 它们本来能打,
+    // 是我们主动放弃了(把机会留给补跑和领奖,否则整轮连结果都拿不到)。
+    if (left() <= WORLD_PREPARE_BUDGET_MS) {
+      notRun.push({ bossKey: key, name: boss.name });
+      continue;
+    }
+    const err = await assistUntilExhausted(api, label, out, { timeoutMs: WORLD_ASSIST_TIMEOUT_MS });
     if (err) failed.push({ label, err });
+  }
+  if (notRun.length > 0) {
+    out.budgetExhausted = true;
+    out.notes.push(`整轮时间预算用尽,${notRun.length} 个首领没轮到(不是失败,是没时间)`);
   }
 
   // 补跑:主循环里连续 3 次都撞上抖动的首领,在整轮末尾再给一次机会。
@@ -749,7 +793,9 @@ export async function runWorldBoss(api, { rules = {} } = {}) {
   // 也会让 collectRealFailures 把这一轮误记成 partial。
   const recovered = new Set();
   for (const f of failed) {
-    const again = await assistUntilExhausted(api, f.label, out, { retries: 1, record: false });
+    // 补跑同样吃预算 —— 时间不够时宁可留着那条错误记录,也不要卡在半路
+    if (left() <= 0) break;
+    const again = await assistUntilExhausted(api, f.label, out, { retries: 1, record: false, timeoutMs: WORLD_ASSIST_TIMEOUT_MS });
     if (!again) recovered.add(f.err);
   }
   if (recovered.size > 0) out.errors = out.errors.filter((e) => !recovered.has(e));

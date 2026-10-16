@@ -121,7 +121,9 @@ export function buildActions(config, { redeemTotals = null } = {}) {
     // 世界首领只参与协作,没有难度也没有胜率闸门
     "boss.world": async (api, row, args = {}) => {
       const r = withOverride(rules(row).boss, args?.rules);
-      return boss.runWorldBoss(api, { rules: r });
+      // budgetMs:本轮到窗口关闭还剩多少毫秒(排程算好传进来,见 plannedJobs)。
+      // 动作层据此收尾 —— 10:00 场服务端过载时,不设预算会耗到窗口关闭。
+      return boss.runWorldBoss(api, { rules: r, budgetMs: args?.budgetMs ?? null });
     },
 
     async activity(api, row, args = {}) {
@@ -133,6 +135,9 @@ export function buildActions(config, { redeemTotals = null } = {}) {
         signIn: args?.signIn ?? r.signIn,
         mail: args?.mail ?? r.mail,
         codex: args?.codex ?? r.codex ?? false,
+        // 邮件是分批领的(服务端一批 25 封),这个值是单轮最多跑几批。
+        // 用途:长期不领的号一次要跑很多批,给它一个可调的硬上限,防服务端异常时死循环。
+        mailMaxBatches: args?.mailMaxBatches ?? r.mailMaxBatches,
         // null = 交给 claimAll 自己按活跃点解档;显式传数组才按名单领(空数组 = 一档都不领)。
         dailyPoints: args?.dailyPoints ?? r.dailyPoints ?? null
       });

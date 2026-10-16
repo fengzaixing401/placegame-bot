@@ -442,6 +442,33 @@ check("材料加成被忽略时以提示色写出,不静默", () => {
   assert.match(t, /材料加成.*已忽略/);
 });
 
+check("邮件分批领取说清领了多少封、分几批", () => {
+  // 服务端 2026-10-12 起改成一批 25 封,71 封积压要跑 3 批才领得完。
+  // 日志要说清"这一轮领了多少",而不是笼统一句"已一键领取"。
+  const t = text({ mail: { batches: 3, processedCount: 60, remainingCount: 0, batchStatus: "complete" } }, "activity");
+  assert.match(t, /领取邮件奖励 60 封/);
+  assert.match(t, /分 3 批/);
+  assert.doesNotMatch(t, /还剩/);
+});
+
+check("邮件没领完时用警告色标出还剩几封", () => {
+  // 剩下没领完不是成功 —— 不能藏在绿色的"已领取"里
+  const t = text({ mail: { batches: 20, processedCount: 500, remainingCount: 71, batchStatus: "partial", truncated: true } }, "activity");
+  assert.match(t, /还剩 71 封未领/);
+  assert.match(t, /批数达上限仍未领完/);
+});
+
+check("世界首领时间预算用尽时写出来(不是失败,是没时间)", () => {
+  // 10:00 场服务端过载:等满 15 秒超时 + 重试,21 个首领跑不完一小时窗口。
+  // 预算见底的收尾必须能看见,否则跟"整轮全废"分不清。
+  const t = text(
+    { assisted: [], skipped: [], errors: [], budgetExhausted: true, notes: ["整轮时间预算用尽,12 个首领没轮到(不是失败,是没时间)"] },
+    "boss.world"
+  );
+  assert.match(t, /时间预算用尽/);
+  assert.match(t, /不是失败/);
+});
+
 check("渲染器抛错时说明白,不吞结果", () => {
   const broken = { get mode() { throw new Error("炸了"); } };
   const t = text(broken, "inventory");

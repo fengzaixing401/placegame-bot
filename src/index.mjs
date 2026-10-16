@@ -50,9 +50,11 @@ async function main() {
   });
 
   // 公会兑换的累计账本。规则里的数量是"累计目标"不是每轮数量,所以要把已换过多少存下来。
-  const actions = buildActions(config, { redeemTotals: new RedeemTotals(db) });
+  // 同一个实例同时喂给动作层(记账)与排程层(判断是否还有没达标的条目)。
+  const redeemTotals = new RedeemTotals(db);
+  const actions = buildActions(config, { redeemTotals });
 
-  const scheduler = new Scheduler({ db, store, service, config, actions });
+  const scheduler = new Scheduler({ db, store, service, config, actions, redeemTotals });
   if (config.schedulerEnabled) {
     scheduler.start();
     console.log(`[init] 排程已启用(时区 ${config.timezone})`);

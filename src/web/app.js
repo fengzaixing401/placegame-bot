@@ -1078,7 +1078,12 @@ function panelBossWorld(r, opts) {
       return bits.join(" · ") || String(row.bossKey ?? "");
     }
   });
-  const payload = () => ({ worldBosses: list.read() });
+  const delay = fNum("起跑延迟(分钟)", r.boss?.worldStartDelayMinutes, {
+    min: 0,
+    max: 20,
+    hint: "窗口开始后先等几分钟再打。10:00 是日重置,开场最挤,等 2 分钟能避开洪峰"
+  });
+  const payload = () => ({ worldBosses: list.read(), worldStartDelayMinutes: delay.read() });
   return {
     node: el(
       "div",
@@ -1088,7 +1093,8 @@ function panelBossWorld(r, opts) {
         textContent:
           "只参与协作讨伐并领奖,不主动挑战,所以没有难度和胜率设置。只在开放时间窗内能协作,时间窗在「通用设置」里配。"
       }),
-      list.node
+      list.node,
+      delay.node
     ),
     read: () => ({ rules: payload() }),
     toRules: () => ({ boss: payload() })
@@ -1125,13 +1131,27 @@ function panelActivity(r, opts) {
         "活跃度上限 100 而七项日常共值 140,做满五项即可拿全五档。勾了「活跃宝箱」就会自动领上面标「可领」的。")
     : el("p", { className: "hint", textContent: "读不到活跃度进度(游戏接口没返回),仍可执行 —— 后端会在执行时自己算一次。" });
 
+  // 邮件是分批领的:服务端一批 25 封,领完会自动继续,所以平时不用管这个值。
+  // 它只是单轮上限,防服务端异常永远回 partial 时死循环。
+  const mailBatches = fNum("邮件最多领几批", r.activity?.mailMaxBatches, {
+    min: 1,
+    max: 100,
+    hint: "一批 25 封,领完会自动继续。这里只是单轮上限(默认 20 批 = 500 封)"
+  });
   const payload = () => {
     const out = {};
     for (const [k, f] of boxes) out[k] = f.read();
+    out.mailMaxBatches = mailBatches.read();
     return out;
   };
   return {
-    node: el("div", { className: "op-form" }, ...(status ? [status] : []), ...boxes.map(([, f]) => f.node)),
+    node: el(
+      "div",
+      { className: "op-form" },
+      ...(status ? [status] : []),
+      ...boxes.map(([, f]) => f.node),
+      mailBatches.node
+    ),
     read: payload,
     toRules: () => ({ activity: payload() })
   };

@@ -62,6 +62,13 @@ const resetAssist = (over = {}) => {
   assistState = { my: 0, max: 3, status: "active", frozen: false, failOnce: {}, ...over };
 };
 
+// 邮件的分批计数。服务端一批 25 封,剩余时批量状态为 partial ——
+// 调用方必须循环到 remainingCount 归零,只调一次就会把后面几百封永远留在邮箱里。
+let mailBatch = { n: 0, done: 0 };
+const resetMail = () => { mailBatch = { n: 0, done: 0 }; };
+// 非 null 时模拟"服务端永远回 partial",用来验证批数上限能兜住死循环。
+let mailBatchStuck = null;
+
 // 难度档。真号每个首领都带 difficultyOptions 三档,门票消耗按类型分野:
 // 个人首领三档全 0(扣的是 personalAttemptPool),地图/世界 普通 0 / 困难 1 / 噩梦 2。
 // 缺了这个字段,useTickets:false 时后端会按"读不到门票消耗"整批跳过 —— 那是刻意的保守行为。
@@ -330,8 +337,28 @@ function fakeFetch(url, opts = {}) {
       return reply({ claimed: body.achievementKey });
     case "/api/retention/sign-in":
       return reply({ signedIn: true });
-    case "/api/mail/claim-all":
-      return reply({ claimedCount: 3 });
+    case "/api/mail/claim-all": {
+      // 服务端 2026-10-12 起改成分批:一次 25 封,剩余时 batchStatus=partial。
+      // 这里造 3 批才领完(25 + 25 + 10 = 60 封)的序列,验证调用方会循环。
+      if (mailBatchStuck) {
+        mailBatchStuck.n += 1;
+        return reply({
+          batchSize: 25, processedCount: 25, remainingCount: 99999,
+          batchStatus: "partial", claimedMailRewardIds: []
+        });
+      }
+      mailBatch.n += 1;
+      const processed = mailBatch.n <= 2 ? 25 : 10;
+      mailBatch.done += processed;
+      const remaining = Math.max(0, 60 - mailBatch.done);
+      return reply({
+        batchSize: 25,
+        processedCount: processed,
+        remainingCount: remaining,
+        batchStatus: remaining > 0 ? "partial" : "complete",
+        claimedMailRewardIds: [`mail_batch_${mailBatch.n}_a`, `mail_batch_${mailBatch.n}_b`]
+      });
+    }
     default:
       return reply({ path }, 404);
   }
@@ -958,6 +985,47 @@ worldAssistBlocked = "";
 const wbNamed = await service.run("fzx401", (api) => bossFeature.runWorldBoss(api, { rules: { worldBosses: ["别的首领"] } }));
 check("点名后不在名单里的不协作", wbNamed.assisted.length === 0 && wbNamed.skipped.length === 0, JSON.stringify(wbNamed.assisted));
 
+// ---- 世界首领:整轮时间预算 ----
+// 场次只开一小时,而 10:00 场(日重置时段)服务端会持续过载:
+// 单次请求等满 15 秒超时 + 退避重试,一个首领最坏 ~48 秒,21 个根本跑不完 ——
+// 实测 2026-10-16「协作 7 / 错 9」,不是次数不够,是时间不够。
+// 预算见底时该主动收尾并记明原因(而不是硬撑到窗口关闭、连为什么没打完都看不出来)。
+resetAssist({ my: 0, max: 3 });
+worldStatusRows = [
+  { instanceId: "wb_boss_w_fixed_20", bossKey: "boss_w", status: "active",
+    maxHp: 1000, currentHp: 900, hpPercent: 90, participantCount: 12, maxAttemptCount: 3 }
+];
+// 已经过期的预算 => 主循环一个都不该发起,全部记进"没轮到"
+const wbNoBudget = await service.run("fzx401", (api) =>
+  bossFeature.runWorldBoss(api, { budgetMs: -1 })
+);
+check(
+  "预算已耗尽时一个协作都不发起,并显式记明原因",
+  wbNoBudget.assisted.length === 0 &&
+    wbNoBudget.budgetExhausted === true &&
+    wbNoBudget.notes.some((n) => /时间预算用尽/.test(n)) &&
+    wbNoBudget.errors.length === 0,
+  JSON.stringify({ assisted: wbNoBudget.assisted.length, notes: wbNoBudget.notes, budget: wbNoBudget.budgetExhausted })
+);
+// 预算充足(1 小时)时照常打,不该误伤
+resetAssist({ my: 0, max: 3 });
+const wbBudgetOk = await service.run("fzx401", (api) =>
+  bossFeature.runWorldBoss(api, { budgetMs: 3600 * 1000 })
+);
+check(
+  "预算充足时照常协作,不误伤",
+  wbBudgetOk.assisted.length > 0 && !wbBudgetOk.budgetExhausted,
+  JSON.stringify({ assisted: wbBudgetOk.assisted.length, budget: wbBudgetOk.budgetExhausted })
+);
+// 不传 budgetMs(直接调用/无排程)时退化为"没有预算限制",保持向后兼容
+resetAssist({ my: 0, max: 3 });
+const wbNoDeadline = await service.run("fzx401", (api) => bossFeature.runWorldBoss(api, { rules: {} }));
+check(
+  "不传 budgetMs 时不设预算,行为与从前一致",
+  wbNoDeadline.assisted.length > 0 && !wbNoDeadline.budgetExhausted,
+  JSON.stringify({ assisted: wbNoDeadline.assisted.length })
+);
+
 // ---- 取首领名单失败时的兜底 ----
 // 真号上有一轮 boss.world 整个任务 status=error、result_json 为空,7 个首领一个都没打,
 // 就因为取名单那个 GET 超时了。api-client 已经退避重试过两次(前后约 3 秒),
@@ -1033,7 +1101,41 @@ worldStatusRows = [
 const act = await service.run("fzx401", (api, row) => actions.activity(api, row));
 check("任务只领可领的(q1)", act.quests.length === 1 && act.quests[0].questKey === "q1", JSON.stringify(act.quests));
 check("成就 completed 可领", act.achievements.length === 1);
-check("签到与邮件", act.signIn?.signedIn === true && act.mail?.claimedCount === 3);
+resetMail();
+const actMail = await service.run("fzx401", (api, row) => actions.activity(api, row));
+check(
+  "邮件分批领取循环到领完(25+25+10=60 封,3 批)",
+  actMail.mail?.batches === 3 &&
+    actMail.mail?.processedCount === 60 &&
+    actMail.mail?.remainingCount === 0 &&
+    actMail.mail?.batchStatus === "complete" &&
+    actMail.mail?.truncated === false,
+  JSON.stringify(actMail.mail)
+);
+
+resetMail();
+const { claimAllMail } = await import("../src/features/activity.mjs");
+const capOut = await service.run("fzx401", (api) => claimAllMail(api, { maxBatches: 2 }));
+check(
+  "邮件的最大批数是硬上限(只跑 2 批 -> 领 50 封,剩 10 封并标记未领完)",
+  capOut?.batches === 2 &&
+    capOut?.processedCount === 50 &&
+    capOut?.remainingCount === 10 &&
+    capOut?.batchStatus === "partial" &&
+    capOut?.truncated === true,
+  JSON.stringify(capOut)
+);
+
+resetMail();
+// 服务端永远回 partial 时不能死循环 —— 这是上限存在的意义。
+mailBatchStuck = { n: 0 };
+const stuckOut = await service.run("fzx401", (api) => claimAllMail(api, { maxBatches: 5 }));
+mailBatchStuck = null;
+check(
+  "服务端永远回 partial 时按上限停手,不发第 6 次请求",
+  stuckOut?.batches === 5 && stuckOut?.truncated === true,
+  JSON.stringify(stuckOut)
+);
 
 const st = await service.run("fzx401", (api, row) => actions.status(api, row));
 check("状态汇总", st.idle?.validSeconds === 39600 && st.bosses === 7, JSON.stringify({ bosses: st.bosses }));
@@ -1125,6 +1227,51 @@ check(
   `${winIdem("2026-09-01T01:59:00.000Z")} / ${winIdem("2026-09-01T03:00:00.000Z")}`
 );
 
+// 起跑错开:窗口开头那几分钟最挤(10:00 是日重置,全服同时上线,
+// 同 tick 还有 collect/inventory/boss.map 排队),所以先等一会儿再起跑。
+// 实测 10-15 的 10:00 场拖到 10:00:59 才起跑,正撞服务端最堵的时候。
+const delayRules = {
+  boss: { enabled: true, challengePersonal: false, worldStartDelayMinutes: 2,
+          worldWindows: [{ start: "10:00", end: "11:00" }] }
+};
+const delayIdem = (iso) => {
+  const now = new Date(iso);
+  return (
+    scheduler
+      .plannedJobs(delayRules, zonedParts(now, config.timezone), now)
+      .find((j) => j.key === "boss.world")?.idem ?? null
+  );
+};
+check(
+  "起跑错开:窗口开头 2 分钟内不排世界首领",
+  delayIdem("2026-09-01T02:00:30.000Z") === null &&
+    delayIdem("2026-09-01T02:01:59.000Z") === null,
+  `10:00:30 -> ${delayIdem("2026-09-01T02:00:30.000Z")}`
+);
+check(
+  "起跑错开:过 2 分钟后正常起跑(仍是前半段那轮)",
+  delayIdem("2026-09-01T02:02:00.000Z") === "boss.world:2026-09-01:10:00-11:00:0",
+  String(delayIdem("2026-09-01T02:02:00.000Z"))
+);
+check(
+  "起跑错开只影响开头,后半段那轮不受影响",
+  delayIdem("2026-09-01T02:32:00.000Z") === "boss.world:2026-09-01:10:00-11:00:1",
+  String(delayIdem("2026-09-01T02:32:00.000Z"))
+);
+// 预算跟着"实际剩余"走:错开 2 分钟后起跑,可用时长应比不错开少 2 分钟
+check(
+  "收尾预算按实际剩余时间算(错开吃掉的 2 分钟会反映在预算里)",
+  (() => {
+    const now = new Date("2026-09-01T02:02:00.000Z");
+    const j = scheduler
+      .plannedJobs(delayRules, zonedParts(now, config.timezone), now)
+      .find((x) => x.key === "boss.world");
+    // 10:02 起跑,窗口 11:00 结束 => 58 分钟
+    return j?.extras?.budgetMs === 58 * 60 * 1000;
+  })(),
+  "10:02 起跑应剩 58 分钟预算"
+);
+
 // 公会兑换是独立任务,间隔**以秒为单位**(用户要求自己设)。
 // 幂等键取秒级时间片编号,所以同一个片里只跑一次,重启也不会重复。
 // 注意排程 tick 是 60 秒一次 —— 实际最小粒度就是 60 秒,填更小不会更快。
@@ -1159,6 +1306,58 @@ check("公会日常与兑换是两个独立任务,各有各的键", (() => {
   const keys = scheduler.plannedJobs(rdRules, zonedParts(now, config.timezone), now).map((j) => j.key);
   return keys.includes("guild") && keys.includes("guild.redeem");
 })());
+
+// 兑换的目标是**累计值**:全部条目都达标后就不该再排这个任务了。
+// 以前到了目标还每 5 分钟空转一轮,日志里堆满「已达目标 2000(已兑换 2000)」,实测空转 2366 轮。
+const rdAt = (iso, progress) => {
+  const now = new Date(iso);
+  return scheduler
+    .plannedJobs(rdRules, zonedParts(now, config.timezone), now, () => null, progress)
+    .some((j) => j.key === "guild.redeem");
+};
+check(
+  "兑换未达目标时照排",
+  rdAt("2026-09-01T02:00:00.000Z", { k1: 0 }) &&
+    rdAt("2026-09-01T02:00:00.000Z", { k1: 4 }),
+  "progress k1=4/5 应排"
+);
+check(
+  "兑换全部达目标后不再排(不再空转)",
+  !rdAt("2026-09-01T02:00:00.000Z", { k1: 5 }) &&
+    !rdAt("2026-09-01T02:00:00.000Z", { k1: 99 }),
+  "progress k1=5/5 不该排"
+);
+check(
+  "多个条目里只要还有一个没达标就继续排",
+  (() => {
+    const r = {
+      guild: { enabled: true, intervalHours: 20, redeem: [{ itemKey: "a", total: 5 }, { itemKey: "b", total: 10 }], redeemIntervalSeconds: 300 }
+    };
+    const now = new Date("2026-09-01T02:00:00.000Z");
+    const at = (progress) =>
+      scheduler.plannedJobs(r, zonedParts(now, config.timezone), now, () => null, progress)
+        .some((j) => j.key === "guild.redeem");
+    return at({ a: 5, b: 3 }) === true && at({ a: 5, b: 10 }) === false;
+  })(),
+  "a 达标 b 未达标 -> 排;a b 都达标 -> 不排"
+);
+check(
+  "条目没给目标(total 缺失或 0)视为一直要换,不会误停",
+  (() => {
+    const r = {
+      guild: { enabled: true, intervalHours: 20, redeem: [{ itemKey: "x" }], redeemIntervalSeconds: 300 }
+    };
+    const now = new Date("2026-09-01T02:00:00.000Z");
+    return scheduler.plannedJobs(r, zonedParts(now, config.timezone), now, () => null, { x: 99999 })
+      .some((j) => j.key === "guild.redeem");
+  })(),
+  "无 target 时不受账本影响"
+);
+check(
+  "账本读不到(传 null)时退化为照排,宁可空转也不漏换",
+  rdAt("2026-09-01T02:00:00.000Z", null),
+  "progress=null 应照排"
+);
 
 // 个人首领按"每天到点打一次"排,不再按间隔切绝对时间片:免费次数是北京时间每日重置的,
 // 24 小时片的片界落在 UTC 00:00(北京 08:00),与重置时刻错开。

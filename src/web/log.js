@@ -550,6 +550,11 @@
       out.push(L("整轮没有一次成功", "bad"));
       out.push(L("下面每一条失败很可能是同一个原因,先看第一条", "muted", 1));
     }
+    // 时间预算用尽:不是故障,是窗口不够用(10:00 场服务端过载时典型)。
+    // 用 warn 色而不是 bad —— 它跟"整轮全废"是两回事,但也不能藏着。
+    if (d.budgetExhausted) {
+      out.push(L("整轮时间预算用尽,有首领没轮到(不是失败,是这一轮时间不够)", "warn"));
+    }
     var g = d.gate;
     if (g) {
       out.push(L("只打胜率不低于 " + N(g.minWinChance || 0) + "% 的" + (g.requirePredictedWin ? "、且预测必胜的" : "") +
@@ -693,7 +698,24 @@
     if (d.mail && (typeof d.mail !== "object" || Object.keys(d.mail).length)) {
       any = true;
       var mm = d.mail.message;
-      out.push(L(typeof mm === "string" && mm ? "邮件:" + mm : "已一键领取邮件奖励", "ok"));
+      if (typeof mm === "string" && mm) {
+        out.push(L("邮件:" + mm, "ok"));
+      } else {
+        var mb = isNum(d.mail.batches) ? d.mail.batches : null;
+        var mp = isNum(d.mail.processedCount) ? d.mail.processedCount : null;
+        var mr = isNum(d.mail.remainingCount) ? d.mail.remainingCount : null;
+        var text = mp === null ? "已一键领取邮件奖励" : "领取邮件奖励 " + mp + " 封";
+        if (mb !== null && mb > 1) text += "(分 " + mb + " 批)";
+        // 还有剩余说明这轮没领完,不是成功 —— 用警告色,别让它藏在 ok 里
+        if (mr !== null && mr > 0) {
+          out.push(L(text + ",还剩 " + mr + " 封未领", "warn"));
+        } else {
+          out.push(L(text, "ok"));
+        }
+        if (d.mail.truncated) {
+          out.push(L("邮件批数达上限仍未领完,下轮继续", "warn"));
+        }
+      }
     }
     if (!any) {
       out.push(L(ap && isNum(ap.score)

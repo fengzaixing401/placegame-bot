@@ -1,6 +1,11 @@
-import { pickList, pickKey } from "../util.mjs";
+import { pickList, pickKey, num } from "../util.mjs";
+import { randomUUID } from "node:crypto";
 import { dynamicView } from "./collect.mjs";
 import { activityProgress } from "../labels.mjs";
+
+// 邮件批量领取的最大批数。服务端一批 25 封,71 封积压只需 3 批;
+// 留到 20 批(500 封)足以应付长期不领的号,又能防止服务端永远回 partial 时死循环。
+export const MAIL_MAX_BATCHES = 20;
 
 // 活跃度进度只在 bootstrap 里,dynamic-view 没有 daily 段。
 export async function bootstrap(api) {
@@ -76,7 +81,7 @@ async function resolveDailyPoints(api, dailyPoints, out) {
 
 // ⑥ 自动领活动与日志奖励。
 // 任务/成就/图鉴没有独立列表端点,都从 dynamic-view 取。
-export async function claimAll(api, { quests = true, achievements = true, daily = true, signIn = true, mail = true, codex = false, dailyPoints = null } = {}) {
+export async function claimAll(api, { quests = true, achievements = true, daily = true, signIn = true, mail = true, codex = false, dailyPoints = null, mailMaxBatches = MAIL_MAX_BATCHES } = {}) {
   const out = { quests: [], achievements: [], codex: [], daily: [], signIn: null, mail: null, activity: null, errors: [] };
   const view = await dynamicView(api);
 
@@ -107,7 +112,7 @@ export async function claimAll(api, { quests = true, achievements = true, daily 
 
   if (mail) {
     try {
-      out.mail = await claimAllMail(api);
+      out.mail = await claimAllMail(api, { maxBatches: mailMaxBatches });
     } catch (err) {
       out.errors.push({ step: "mail", error: err.message });
     }
@@ -146,8 +151,55 @@ export async function listMail(api) {
   return pickList(data, "messages", "items", "mails");
 }
 
-export async function claimAllMail(api) {
-  return api.post("/api/mail/claim-all", {});
+// 一次性领完所有邮件。
+//
+// **服务端自 2026-10-12 起改成分批协议**:POST /api/mail/claim-all 一次只处理
+// batchSize(实测 25)封,返回 processedCount / remainingCount / batchStatus,
+// 还有剩余时 batchStatus = "partial"。旧写法只调一次就收工,于是:
+//   10-16 实测 processedCount=25 / remainingCount=71 / batchStatus=partial
+// 71 封邮件(含每日登录、世界首领排名结算)永远领不掉,而且每轮都从最早那批
+// 重新开始 —— claimedMailRewardIds 里天天是同一批 7 月的 ID,这就是证据。
+//
+// 所以必须循环到 remainingCount 为 0(或服务端不再说 partial)。
+// 注意:每次请求都走同一个幂等键会失效(服务端把重复提交折叠成一次),
+// claim-all 不在 IDEMPOTENT_MUTATION_PATHS 里,所以默认不自动加幂等键;
+// 这里显式每批换新键,确保每批都被真正执行。
+export async function claimAllMail(api, { maxBatches = MAIL_MAX_BATCHES } = {}) {
+  const batches = [];
+  let guard = 0;
+  for (;;) {
+    guard += 1;
+    const res = await api.post("/api/mail/claim-all", {}, { idempotencyKey: randomUUID() });
+    const processed = num(res?.processedCount);
+    const remaining = num(res?.remainingCount);
+    batches.push({
+      batchStatus: res?.batchStatus ?? null,
+      processedCount: processed,
+      remainingCount: remaining,
+      claimedMailRewardIds: res?.claimedMailRewardIds ?? [],
+      // 只有第一批带 items/mails/notices 这类大字段,后续批次的落库裁剪靠 #storableResult
+      ...(guard === 1 ? { items: res?.items, mails: res?.mails, notices: res?.notices } : {})
+    });
+    const done =
+      res?.batchStatus !== "partial" ||
+      remaining === 0 ||
+      processed === 0 ||
+      processed === null;
+    if (done || guard >= maxBatches) break;
+  }
+  const last = batches.at(-1) ?? {};
+  return {
+    batches: batches.length,
+    processedCount: batches.reduce((s, b) => s + (b.processedCount ?? 0), 0),
+    remainingCount: last.remainingCount ?? null,
+    batchStatus: last.batchStatus ?? null,
+    claimedMailRewardIds: last.claimedMailRewardIds ?? [],
+    items: batches[0]?.items,
+    mails: batches[0]?.mails,
+    notices: batches[0]?.notices,
+    // maxBatches 用完还没领完时显式记一笔,别静默当成成功
+    truncated: last.batchStatus === "partial" && batches.length >= maxBatches
+  };
 }
 
 export async function activityLogs(api) {

@@ -95,13 +95,16 @@ export function activeWindow(parts, windows) {
 // - window 型:用日期 + 窗口标识 + 窗口内的第几轮(世界首领一个窗口跑两轮 ——
 //   协作额度不跨窗口,前半段没打上的后半段还有机会)
 export class Scheduler {
-  constructor({ db, store, service, config, actions, logger = console }) {
+  constructor({ db, store, service, config, actions, logger = console, redeemTotals = null }) {
     this.db = db;
     this.store = store;
     this.service = service;
     this.config = config;
     this.actions = actions;
     this.logger = logger;
+    // 兑换账本。排程用它判断"是否还有没达标的条目" —— 全达标就不排这个任务。
+    // 允许为 null(测试装配时省事),此时排程退化为"照排",不影响正确性。
+    this.redeemTotals = redeemTotals;
     this.timer = null;
     this.running = false;
     this.lastTickAt = null;
@@ -146,7 +149,11 @@ export class Scheduler {
   async #runAccount(account, now) {
     const rules = rulesFor(this.config, account.rules_json ? JSON.parse(account.rules_json) : null);
     const parts = zonedParts(now, this.config.timezone);
-    const jobs = this.plannedJobs(rules, parts, now);
+    // 兑换的累计账本:排程要据此判断"是否还有没达标的条目"。
+    // 全达标就不排这个任务了 —— 否则它每 5 分钟空转一轮,日志里堆满
+    // 「已达目标 2000(已兑换 2000)」这种废话(实测已经空转 2366 轮)。
+    const totals = this.redeemTotals ? this.redeemTotals.all(account.id) : null;
+    const jobs = this.plannedJobs(rules, parts, now, () => null, totals);
     const ran = [];
     for (const job of jobs) {
       // 单任务失败不影响该账号的其他任务
@@ -163,7 +170,10 @@ export class Scheduler {
   // 产出本 tick 应当尝试的任务(带幂等键)。是否真正执行由 job_runs 唯一约束裁决。
   // lastRunOf(jobKey) 给出该任务上一轮的起跑时刻(ISO,没跑过给 null)。
   // 现在只有测试还在传它 —— 地图首领改对齐排程后,排程不再依赖"上一轮什么时候跑的"。
-  plannedJobs(rules, parts, now, lastRunOf = () => null) {
+  //
+  // redeemProgress 是兑换的累计账本 {itemKey: redeemed},用来判断"是否还有没达标的条目"。
+  // 传 null 表示无从判断,此时按老行为照排(宁可空转也不漏换)。
+  plannedJobs(rules, parts, now, lastRunOf = () => null, redeemProgress = null) {
     const jobs = [];
     const slot = (hours) => Math.floor(now.getTime() / (hours * 3600 * 1000));
 
@@ -198,9 +208,23 @@ export class Scheduler {
       // 间隔以秒为单位(用户要求自己设),但**排程 tick 是 60 秒一次** ——
       // 所以实际最小粒度就是 60 秒,填 30 也不会更快。这一点写在面板提示里。
       // 没配兑换清单就不排,免得空跑。
+      //
+      // **全部条目都达目标后就不再排**:目标是累计值,到了就是到了,继续排只会
+      // 每 5 分钟空跑一轮、往日志里堆「已达目标 2000」的废话(实测已空转 2366 轮)。
+      // 想继续攒就把面板上的目标调大,下一 tick 自动恢复排程 —— 无需重启。
       const secs = Number(rules.guild.redeemIntervalSeconds);
       const hasRedeem = Array.isArray(rules.guild.redeem) && rules.guild.redeem.length > 0;
-      if (hasRedeem && Number.isFinite(secs) && secs > 0) {
+      const pendingRedeem = hasRedeem
+        ? rules.guild.redeem.some((entry) => {
+            const key = entry?.itemKey;
+            if (!key) return false;
+            const target = Number(entry?.total);
+            if (!Number.isFinite(target) || target <= 0) return true; // 没给目标 = 一直换
+            const done = Number(redeemProgress?.[key] ?? 0);
+            return done < target;
+          })
+        : false;
+      if (hasRedeem && pendingRedeem && Number.isFinite(secs) && secs > 0) {
         jobs.push({ key: "guild.redeem", idem: `guild.redeem:${Math.floor(now.getTime() / (secs * 1000))}` });
       }
     }
@@ -227,8 +251,26 @@ export class Scheduler {
         //
         // 后一轮绝大部分会被服务端判「本场次协作次数已用尽」直接跳过,成本很低 ——
         // 一次 worldStatus + 一次首领名单 + 几个跳过,不发 assist。
-        const half = Math.floor((parts.minutes - toMinutes(String(win).split("-")[0])) / 30);
-        jobs.push({ key: "boss.world", idem: `boss.world:${parts.date}:${win}:${half}` });
+        //
+        // **起跑错开**:窗口刚开始的那几分钟最挤 —— 10:00 是游戏日重置时刻,
+        // 全服玩家同时上线,再加上同一 tick 里 collect/inventory/boss.map 排队,
+        // 实测 10-15 的 10:00 场拖到 10:00:59 才起跑,一进去就是服务端最堵的时候。
+        // 所以窗口开头先等一会儿(worldStartDelayMinutes),把起跑挪到洪峰之后。
+        const startMin = toMinutes(String(win).split("-")[0]);
+        const endMin = toMinutes(String(win).split("-")[1]);
+        const delay = Math.max(0, Number(rules.boss.worldStartDelayMinutes ?? 0));
+        if (parts.minutes >= startMin + delay) {
+          const half = Math.floor((parts.minutes - startMin) / 30);
+          // 本轮可用时长 = 从现在到窗口结束。
+          // 交给动作层让它自己盯着收尾 —— 场次只开一小时,而 10:00 场服务端会持续过载,
+          // 不设预算就会耗到窗口关闭、连"为什么没打完"都看不出来(实测 10-16「协作 7 / 错 9」)。
+          const minutesLeft = Math.max(0, endMin - parts.minutes);
+          jobs.push({
+            key: "boss.world",
+            idem: `boss.world:${parts.date}:${win}:${half}`,
+            extras: { budgetMs: minutesLeft * 60 * 1000 }
+          });
+        }
       }
     }
     if (rules.activity?.enabled && parts.minutes >= toMinutes(rules.activity.dailyAt)) {
@@ -270,7 +312,9 @@ export class Scheduler {
     }
 
     try {
-      const result = await this.service.run(account.id, (client) => action(client, account));
+      // 任务的附加参数(如世界首领的时间预算)作为第三个参数交给动作层。
+      // 动作层统一签名为 (api, row, args = {}),没用到 extras 的任务会忽略它。
+      const result = await this.service.run(account.id, (client) => action(client, account, job.extras ?? {}));
       // 动作正常返回不等于成功:失败被收在 result.errors 里(见 collectRealFailures)。
       // 有真失败就不记 ok —— 记 partial 并把摘要写进 error 列,免得绿色盖住故障。
       //
