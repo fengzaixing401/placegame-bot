@@ -2184,7 +2184,7 @@ check("方法不允许 405", (await call("PUT", "/accounts")).status === 405);
 check("未知端点 404", (await call("GET", "/nope")).status === 404);
 const restCollect = await call("POST", "/accounts/fzx401/collect", { body: {} });
 check("REST 触发收益", restCollect.status === 200 && restCollect.json.data.adventureResolved === true);
-// daily-run 会按默认规则跑一遍分解。默认 mode 现在是 explicit(成色评分低于 86),
+// daily-run 会按默认规则跑一遍分解。默认 mode 现在是 explicit(成色评分低于 90),
 // 不再有"auto 预检背包"那一层。这里仍先摘掉受保护装备行,让这一条专注验证
 // "整轮串起来能跑通";硬保护与成色判定本身由上面的用例覆盖。
 equipmentHardRows = false;
@@ -2192,9 +2192,16 @@ const dr = await call("POST", "/accounts/fzx401/daily-run", { body: {} });
 check("一键日常各步骤", Object.keys(dr.json.data.ran).length === 6, JSON.stringify(Object.keys(dr.json.data.ran)));
 check("一键日常无错", dr.json.data.errors.length === 0, JSON.stringify(dr.json.data.errors));
 check(
-  "默认走 explicit 成色分解(低于 86)",
-  dr.json.data.ran.inventory?.mode === "explicit" && dr.json.data.ran.inventory?.conditions?.maxRareScore === 86,
+  "默认走 explicit 成色分解(低于 90)",
+  dr.json.data.ran.inventory?.mode === "explicit" && dr.json.data.ran.inventory?.conditions?.maxRareScore === 90,
   JSON.stringify(dr.json.data.ran.inventory)
+);
+// 默认白名单必须含 gold(神话)。实测该账号背包 232 件全是 gold,而旧默认只到 red,
+// 白名单先于成色条件过滤 —— 漏了 gold,阈值改成多少都一件不拆。
+check(
+  "默认可分解名单包含 gold(神话)",
+  (dr.json.data.ran.inventory?.conditions?.qualities ?? []).includes("gold"),
+  JSON.stringify(dr.json.data.ran.inventory?.conditions?.qualities)
 );
 const dis = await call("POST", "/accounts/fzx401/disable", { body: { reason: "维护" } });
 check("停用账号", dis.json.data.enabled === false);
