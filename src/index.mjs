@@ -9,6 +9,7 @@ import { Scheduler } from "./scheduler.mjs";
 import { createHttpServer } from "./http-server.mjs";
 import { buildActions } from "./actions.mjs";
 import { RedeemTotals } from "./redeem-totals.mjs";
+import { BossSlotCursor } from "./boss-slot-cursor.mjs";
 
 async function main() {
   const config = await loadConfig();
@@ -52,7 +53,9 @@ async function main() {
   // 公会兑换的累计账本。规则里的数量是"累计目标"不是每轮数量,所以要把已换过多少存下来。
   // 同一个实例同时喂给动作层(记账)与排程层(判断是否还有没达标的条目)。
   const redeemTotals = new RedeemTotals(db);
-  const actions = buildActions(config, { redeemTotals });
+  // 个人首领的定向装备部位轮换游标(跨轮次、跨重启持久化)
+  const slotCursor = new BossSlotCursor(db);
+  const actions = buildActions(config, { redeemTotals, slotCursor });
 
   const scheduler = new Scheduler({ db, store, service, config, actions, redeemTotals });
   if (config.schedulerEnabled) {

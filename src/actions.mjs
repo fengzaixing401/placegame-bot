@@ -11,7 +11,7 @@ import * as activity from "./features/activity.mjs";
 //
 // 本模块只做两件事:把 args 与账号 rules 合成一次调用参数、把结果原样回传。
 // 具体玩法(怎么筛、什么闸门、发什么字段)都在 features/* 里,别往这里堆业务判断。
-export function buildActions(config, { redeemTotals = null } = {}) {
+export function buildActions(config, { redeemTotals = null, slotCursor = null } = {}) {
   const rules = (row) => rulesFor(config, row?.rules_json ? JSON.parse(row.rules_json) : null);
 
   // WebUI 的操作面板执行时把当前表单值作为本次覆盖发进来,不落库。
@@ -106,6 +106,9 @@ export function buildActions(config, { redeemTotals = null } = {}) {
     // 个人首领:安全闸门是 personalBosses 必须点名,空名单一个都不打。
     // challengePersonal 只管"要不要自动排程",由 scheduler 判断,不在这里拦手动执行 ——
     // 用户点开这个面板按确定执行,意图已经很明确了。
+    //
+    // slotCursor + row.id:定向装备部位按次轮换(见 boss-slot-cursor.mjs)。
+    // 只有个人首领支持 targetSlot,所以只在这一路传。
     "boss.personal": async (api, row, args = {}) => {
       const r = withOverride(rules(row).boss, args?.rules);
       return boss.runBosses(api, {
@@ -114,7 +117,9 @@ export function buildActions(config, { redeemTotals = null } = {}) {
         // 个人首领的上限就是用户设的每日次数,不跟地图首领共用一个键。
         // runBosses 里的 personalBudget 还会按池子余量与门票闸门再封一次顶。
         maxChallenges: args?.maxChallenges ?? r.personalMaxPerDay,
-        dryRun: args?.dryRun === true
+        dryRun: args?.dryRun === true,
+        slotCursor,
+        accountId: row?.id ?? null
       });
     },
 
@@ -165,6 +170,11 @@ export function buildActions(config, { redeemTotals = null } = {}) {
         difficulties: bossPanel.difficulties,
         challengeOptions: bossPanel.challengeOptions,
         freeAttemptsLeft: bossPanel.freeAttemptsLeft,
+        // 定向装备轮换:每个个人首领下一次会打哪个部位。
+        // 游标是跨轮持续的,面板不显示的话用户会以为"每次都随机掉"。
+        slotRotation: slotCursor && row?.id
+          ? slotCursor.state(row.id, bossPanel.challengeOptions.targetSlots)
+          : [],
         // 公会:兑换用仓库清单、捐献用背包清单 —— 两套不同的东西,接口收的字段也不同
         donatableItems: guildPanel.donatableItems,
         redeemableItems: guildPanel.redeemableItems,

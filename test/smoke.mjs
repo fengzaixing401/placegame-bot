@@ -135,8 +135,15 @@ function fakeFetch(url, opts = {}) {
           // 可挑战但胜率不足,用来验证胜率闸门确实会拦
           { key: "boss_low", type: "map", name: "胜率不足", blockedReason: "", difficultyOptions: diffs("map", 30) },
           // 个人首领:默认必须完全不碰(野猪王回归用例)。免费次数在行级 personalAttemptPool 上
+          //
+          // challengeOptions.targetSlots:实测 10 个部位,顺序即游戏内顺序。定向装备轮换
+          // 靠它,缺了这段新逻辑会静默跳过 —— 测试也就测不到东西。
+          // 只放 4 个而不是 10 个:用例要跑"跨轮接续"和"走完一圈回绕",
+          // 4 个只要 5 次就能跨过一圈,10 个要 11 次、日志长得看不清轮换。
           { key: "boss_pig", type: "personal", name: "野猪王", blockedReason: "",
             difficultyOptions: diffs("personal"),
+            challengeOptions: { targetSlots: [{ key: "weapon", name: "武器" }, { key: "armor", name: "衣服" },
+              { key: "ring", name: "戒指" }, { key: "medal", name: "勋章" }] },
             personalAttemptPool: { freeRemaining: freeAttempts, freeLimit: 5, ticketUsed: 0, ticketLimit: 5, nextTicketCost: 0 } },
           { key: "boss_w", type: "world", name: "世界首领", blockedReason: "",
             difficultyOptions: diffs("world"),
@@ -381,6 +388,7 @@ const { SettingsStore } = await import("../src/settings.mjs");
 const { buildActions } = await import("../src/actions.mjs");
 const { RedeemTotals } = await import("../src/redeem-totals.mjs");
 const { unwrap } = await import("../src/util.mjs");
+const { BossSlotCursor } = await import("../src/boss-slot-cursor.mjs");
 const { GameApiClient } = await import("../src/api-client.mjs");
 const bossFeature = await import("../src/features/boss.mjs");
 
@@ -439,7 +447,10 @@ console.log("\n[3] 账号与动作");
 const db = openDb(config.dbPath);
 const store = new AccountStore(db, new SecretBox(config.masterKeyB64));
 const service = new AccountService({ store, baseUrl: config.baseUrl, version: "0.2.50", fetchImpl: fakeFetch });
-const actions = buildActions(config, { redeemTotals: new RedeemTotals(db) });
+// slotCursor:个人首领的「定向装备部位」轮换(见 boss-slot-cursor.mjs)。
+// 与 index.mjs 的装配保持一致 —— 少传这个,轮换特性在测试里等于不存在。
+const slotCursor = new BossSlotCursor(db);
+const actions = buildActions(config, { redeemTotals: new RedeemTotals(db), slotCursor });
 const scheduler = new Scheduler({ db, store, service, config, actions, logger: { log() {}, error() {} } });
 
 service.create({
@@ -906,6 +917,112 @@ check(
   ).notes.some((n) => n.includes("材料加成")),
   "个人档普通,该报已忽略"
 );
+
+// ---- 定向装备部位轮换(targetSlot)----
+// 用户要的是「每次获得的装备轮流选择」:每次挑战换下一个部位,一天 10 次走完一圈,
+// 第二天接着往下走而不是重置。游标按 (账号, 首领) 持久化在 boss_slot_cursor。
+const SLOTS = ["weapon", "armor", "ring", "medal"];
+const myId = store.getByLabel("fzx401").id;
+// 只取本段之后发出的**挑战**体(预览体也有 targetSlot,混进来会把"每场一次"数成两次)。
+// 轮换的正确性看的是"真发出去的挑战用了哪个部位",不是回填的记录。
+const slotBodies = (from) =>
+  calls.slice(from).filter((c) => c.path === "/api/boss/challenge").map((c) => c.body.targetSlot);
+
+slotCursor.reset(myId);
+freeAttempts = 5;
+let from = calls.length;
+const rot1 = await runPersonal({ personalBosses: ["boss_pig"], personalMaxPerDay: 3 });
+check(
+  "定向部位按次轮换:第 1、2、3 次依次换部位",
+  JSON.stringify(rot1.attempted.map((x) => x.targetSlot)) === JSON.stringify(["weapon", "armor", "ring"]),
+  JSON.stringify(rot1.attempted.map((x) => x.targetSlot))
+);
+check(
+  "targetSlot 真的发到服务端(挑战体里每场一次)",
+  JSON.stringify(slotBodies(from)) === JSON.stringify(["weapon", "armor", "ring"]),
+  JSON.stringify(slotBodies(from))
+);
+check(
+  "打完之后吐下一次该用的部位",
+  rot1.slotRotation?.length === 1 && rot1.slotRotation[0].nextSlot === "medal",
+  JSON.stringify(rot1.slotRotation)
+);
+
+// 跨轮接续:游标落库,下一轮从断点接着走,不是从头开始
+from = calls.length;
+const rot2 = await runPersonal({ personalBosses: ["boss_pig"], personalMaxPerDay: 2 });
+check(
+  "跨轮次接续(不重置)",
+  JSON.stringify(slotBodies(from)) === JSON.stringify(["medal", "weapon"]),
+  JSON.stringify(slotBodies(from))
+);
+check("走完一圈会回绕到第一个部位", rot2.slotRotation?.[0]?.nextSlot === "armor", JSON.stringify(rot2.slotRotation));
+check("游标落库到 boss_slot_cursor", slotCursor.nextIndex(myId, "boss_pig") === 1, String(slotCursor.nextIndex(myId, "boss_pig")));
+
+// dryRun 只在预览里展示、不消耗部位 —— 否则预览一次就白白跳过一件装备。
+// dryRun 走的是动作的第二参数(args),不是 rules —— 塞进 rules 里它只是个没人读的字段,
+// 挑战照常发生,这条用例就成了空转(踩过)。
+freeAttempts = 5;
+const before = slotCursor.nextIndex(myId, "boss_pig");
+from = calls.length;
+const rotDry = await service.run("fzx401", (api, row) =>
+  actions["boss.personal"](api, row, {
+    dryRun: true,
+    rules: { personalBosses: ["boss_pig"], personalMaxPerDay: 2, personalDifficulty: "normal", minWinChance: 80, requirePredictedWin: true }
+  })
+);
+check(
+  "dryRun 也指明这次会是哪个部位",
+  // 逐次推进只发生在"真打上"之后(见 bumpSlot),dryRun 整轮都停在同一格 —— 这是对的:
+  // 预览没消耗任何装备,同一个部位就是它下一次真正会用的那个。
+  JSON.stringify(rotDry.attempted.map((x) => x.targetSlot)) === JSON.stringify(["armor", "armor"]),
+  JSON.stringify(rotDry.attempted.map((x) => x.targetSlot))
+);
+check("dryRun 不动游标", slotCursor.nextIndex(myId, "boss_pig") === before, `${before} -> ${slotCursor.nextIndex(myId, "boss_pig")}`);
+check("dryRun 之后没有挑战请求", !calls.slice(from).some((c) => c.path === "/api/boss/challenge"));
+check(
+  "dryRun 的预览体里也带上了部位",
+  JSON.stringify(calls.slice(from).filter((c) => c.path === "/api/boss/preview").map((c) => c.body.targetSlot)) ===
+    JSON.stringify(["armor", "armor"]),
+  JSON.stringify(calls.slice(from).filter((c) => c.path === "/api/boss/preview").map((c) => c.body.targetSlot))
+);
+
+// 打不上的场次不该占掉一个部位:失败注入下整轮一个都没打上,游标必须原地不动
+freeAttempts = 5;
+const beforeFail = slotCursor.nextIndex(myId, "boss_pig");
+challengeFailure = "首领不存在";
+from = calls.length;
+const rotFail = await runPersonal({ personalBosses: ["boss_pig"], personalMaxPerDay: 2 });
+challengeFailure = "";
+check(
+  "报错的场次不推进游标",
+  rotFail.attempted.length === 0 && rotFail.errors.length > 0 && slotCursor.nextIndex(myId, "boss_pig") === beforeFail,
+  JSON.stringify({ attempted: rotFail.attempted.length, errors: rotFail.errors.length, cursor: slotCursor.nextIndex(myId, "boss_pig") })
+);
+
+// 换首领要重新从它的第一个部位开始补,不能接着上一个首领的位置
+slotCursor.reset(myId);
+freeAttempts = 5;
+await runPersonal({ personalBosses: ["boss_pig"], personalMaxPerDay: 2 });
+check(
+  "换了首领后新首领从第一个部位开始",
+  slotCursor.nextIndex(myId, "boss_pig") === 2 && slotCursor.nextIndex(myId, "别的首领") === 0,
+  JSON.stringify(slotCursor.state(myId, SLOTS))
+);
+
+// 地图首领不支持 targetSlot:不是"该不该轮换",是这个参数发过去整场会被拒。
+// 这里必须一个都不发 —— 漏发只是少拿一件定向装备,误发是整轮失败。
+// slotBodies 里存的是 targetSlot 值,不发时是 undefined,故用"全是 undefined"判。
+slotCursor.reset(myId);
+from = calls.length;
+const bmNoSlot = await service.run("fzx401", (api, row) => actions["boss.map"](api, row, { rules: { difficulty: "normal" } }));
+const bmSlots = slotBodies(from);
+check(
+  "地图首领不发 targetSlot",
+  bmNoSlot.attempted.length > 0 && bmSlots.length > 0 && bmSlots.every((v) => v === undefined),
+  JSON.stringify(bmSlots)
+);
+check("地图首领不打时也不留下定向部位游标", slotCursor.state(myId, SLOTS).length === 0, JSON.stringify(slotCursor.state(myId, SLOTS)));
 
 // 失败摘要的**条数必须是真实失败数**,不是去重后的消息种类数。
 // 踩过:10-08 那轮世界首领协作 0 次、4 个首领全超时,摘要却说「1 项失败:请求超时。」——
@@ -1588,7 +1705,9 @@ const OPTIONS_KEYS = [
   "professionActions",
   "professions",
   "redeemableItems",
-  "selectedProfession"
+  "selectedProfession",
+  // 定向装备轮换:每个个人首领下一次会打哪个部位(跨轮持续,见 boss-slot-cursor.mjs)
+  "slotRotation"
 ];
 check(
   "options 键集与前端契约一致",

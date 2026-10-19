@@ -500,7 +500,13 @@ export function digestWorldStatus(list) {
 // ⑤ 按规则挑战首领。
 // 地图首领与个人首领分开控制:个人首领必须 challengePersonal=true 且显式列出目标,
 // 否则一次自动运行就会把免费次数打光甚至扣掉门票。
-export async function runBosses(api, { types, rules = {}, maxChallenges = 5, dryRun = false } = {}) {
+//
+// slotCursor / accountId:个人首领的「定向装备部位」轮换(见 boss-slot-cursor.mjs)。
+// 不传就退化成老行为(不发 targetSlot,服务端自己决定掉什么)。
+export async function runBosses(
+  api,
+  { types, rules = {}, maxChallenges = 5, dryRun = false, slotCursor = null, accountId = null } = {}
+) {
   // 个人首领与地图首领各有自己的难度设置:两类首领在页面上是两个面板,
   // 共用一个 difficulty 会让其中一个面板的选择被另一个悄悄改掉。
   const difficultyFor = (boss) =>
@@ -539,6 +545,27 @@ export async function runBosses(api, { types, rules = {}, maxChallenges = 5, dry
   const bosses = await bossesOrNull(api, undefined, out);
   if (!bosses) return out;
   out.freeAttemptsLeft = freeAttemptsLeft(bosses);
+
+  // 定向装备部位轮换:只有个人首领支持 targetSlot,而且要有游标才启用。
+  // 槽位清单从服务端 challengeOptions.targetSlots 取(顺序即游戏内顺序),
+  // 拿不到就整条特性静默跳过 —— 宁可不指定部位,也不能发一个服务端不认的值让整场失败。
+  const slots = activeTypes.includes(BOSS_TYPE.PERSONAL) && slotCursor && accountId
+    ? challengeOptions(bosses).targetSlots
+    : [];
+  // 游标按 (账号, 首领) 存:换了首领应该从头开始补它的十个部位,而不是接着上一个首领的位置。
+  // 但同一个首领在一轮里被打多次时,游标要逐次推进,所以先读进内存、最后再落一次库。
+  const cursorAt = new Map();
+  const slotFor = (bossKey) => {
+    if (slots.length === 0) return null;
+    if (!cursorAt.has(bossKey)) cursorAt.set(bossKey, slotCursor.nextIndex(accountId, bossKey));
+    const idx = cursorAt.get(bossKey) % slots.length;
+    return slots[idx] ?? null;
+  };
+  const bumpSlot = (bossKey) => {
+    if (slots.length === 0) return;
+    const cur = cursorAt.get(bossKey) ?? 0;
+    cursorAt.set(bossKey, (cur + 1) % slots.length);
+  };
 
   const selected = selectCandidates(bosses, { activeTypes, rules, skip });
   const candidates = activeTypes.includes(BOSS_TYPE.PERSONAL)
@@ -581,12 +608,23 @@ export async function runBosses(api, { types, rules = {}, maxChallenges = 5, dry
     }
 
     // 发给服务端的难度必须是这一类首领自己的那档,不能直接透传 rules.difficulty
-    const bossRules = { ...rules, difficulty };
+    // 定向部位:个人首领按游标轮流指定,让每次掉不同部位的定向装备。
+    // 地图/世界首领不支持 targetSlot,slotFor 对它们返回 null,不会误发。
+    const targetSlot = boss.type === BOSS_TYPE.PERSONAL ? slotFor(key) : null;
+    const bossRules = { ...rules, difficulty, ...(targetSlot ? { targetSlot } : {}) };
 
     try {
       if (dryRun) {
+        // 预览不动游标:dryRun 不该消耗一个部位,否则预览一次就白白跳过一件装备。
+        // 但要把"这次会指定哪个部位"记出来,否则预览看不出轮换效果。
         const result = await preview(api, key, bossRules);
-        out.attempted.push({ ...label, dryRun: true, forecast: readForecast(result), result: digestPreviewResult(result) });
+        out.attempted.push({
+          ...label,
+          ...(targetSlot ? { targetSlot } : {}),
+          dryRun: true,
+          forecast: readForecast(result),
+          result: digestPreviewResult(result)
+        });
         continue;
       }
 
@@ -599,11 +637,15 @@ export async function runBosses(api, { types, rules = {}, maxChallenges = 5, dry
       const result = await challenge(api, key, bossRules);
       out.attempted.push({
         ...label,
+        ...(targetSlot ? { targetSlot } : {}),
         dryRun: false,
         forecast: verdict.forecast,
         win: result?.battle?.win,
         result: digestChallengeResult(result)
       });
+
+      // 打进了才推进游标:被闸门拦下/报错的场次没消耗装备,不该占掉一个部位。
+      bumpSlot(key);
 
       // 夹在 0:整轮次数可以超过免费额度(超出部分扣门票),真号上出现过
       // 免费余 4 打了 5 次、日志显示"免费余 -1"。免费次数不存在负数。
@@ -622,6 +664,23 @@ export async function runBosses(api, { types, rules = {}, maxChallenges = 5, dry
       name: "(本轮上限截断)",
       reason: `本轮挑战数已达上限 ${maxChallenges},还有 ${candidates.length - cutAt} 个候选没轮到。调大上限,或把名单收窄`
     });
+  }
+
+  // 游标落库。整轮只写一次(循环里只推进内存值),失败也只是少记一个部位,
+  // 所以写库失败记 note 而不是 error —— 不该让整轮挑战因此标红。
+  if (!dryRun && slots.length > 0 && slotCursor && accountId) {
+    try {
+      for (const [bossKey, idx] of cursorAt) {
+        slotCursor.set(accountId, bossKey, idx);
+      }
+    } catch (err) {
+      out.notes.push(`定向部位游标没存上(${err.message}),下一轮可能重复同一个部位`);
+    }
+    // 面板要能看到"下一次打哪个部位",把它显式吐出来
+    out.slotRotation = [...cursorAt].map(([bossKey, idx]) => ({
+      bossKey,
+      nextSlot: slots[idx % slots.length] ?? null
+    }));
   }
 
   if (!dryRun && out.attempted.length > 0) {

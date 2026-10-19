@@ -989,6 +989,28 @@ function panelBossPersonal(r, opts) {
   });
   const combat = bossCombat(r, opts);
 
+  // 定向装备轮换的当前进度。游标存在本地库里、跨轮持续,页面上不写出来,
+  // 用户会以为"每次掉的装备是随机的",也就没法解释为什么总掉同一个部位。
+  // 只显示被勾选的那些首领 —— 没在打的首领写"下一场"毫无意义。
+  const slots = (opts?.challengeOptions?.targetSlots ?? []).filter(Boolean);
+  const slotLabel = (k) => {
+    const hit = slots.find((s) => (typeof s === "string" ? s === k : s.key === k));
+    return (typeof hit === "object" && hit?.name) || k;
+  };
+  // list.read() 每次调用都会重算勾选状态,所以这里只取一次
+  const picked = new Set(list.read());
+  const rotationRows = (opts?.slotRotation ?? []).filter((x) => x && x.nextSlot && picked.has(x.bossKey));
+  const rotationNode = rotationRows.length
+    ? el("p", {
+        className: "hint",
+        textContent:
+          "定向装备按次轮换:一天打几次就换几个部位,跨天接着往下走 —— " +
+          rotationRows
+            .map((x) => `${rows.find((b) => b.bossKey === x.bossKey)?.name ?? x.bossKey} 下一场掉 ${slotLabel(x.nextSlot)}`)
+            .join(";")
+      })
+    : null;
+
   const payload = () => {
     const out = combat.into(
       gates.into({
@@ -1009,6 +1031,7 @@ function panelBossPersonal(r, opts) {
       { className: "op-form" },
       difficulty.node,
       list.node,
+      ...(rotationNode ? [rotationNode] : []),
       perDay.node,
       at.node,
       schedule.node,

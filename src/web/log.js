@@ -492,6 +492,10 @@
     var name = (a && (a.name || a.bossKey)) || "未知首领";
     // 难度记在每条结果上:个人与地图首领各有自己那档,只在开头写一次会张冠李戴
     if (a && a.difficulty) name += "(" + PGL.difficulty(a.difficulty) + ")";
+    // 定向部位:个人首领每次指定一个部位掉定向装备(见 boss-slot-cursor.mjs)。
+    // 不写出来的话,日志里九场个人首领长得一模一样,看不出装备在逐个轮换 ——
+    // 而"到底打的是哪个部位"恰恰是这条特性唯一可观测的结果。
+    if (a && a.targetSlot) name += " → " + PGL.slot(a.targetSlot);
     if (a && a.dryRun) {
       var f = a.forecast || {};
       var verdict = f.predictedWin === true ? "预测能赢" : f.predictedWin === false ? "预测打不过" : "预测结果未知";
@@ -574,6 +578,18 @@
     var att = take(d.attempted);
     att.rows.forEach(function (a) { bossAttempt(a, out); });
     att.notes.forEach(function (n) { out.push(L(n, "muted")); });
+
+    // 定向装备轮换的下一站。每场那一行已经写了「→ 部位」,这里只留一句收尾,
+    // 让人一眼看到"下一轮从哪儿接着走" —— 游标是跨轮持续的,单看当轮看不出来。
+    // 中文名从本轮的 attempted 里借(与下面的世界首领状态同一套做法),借不到退回 key。
+    var rotNames = {};
+    att.rows.forEach(function (a) { if (a && a.bossKey && a.name) rotNames[a.bossKey] = a.name; });
+    var rotRows = take(d.slotRotation).rows.filter(function (x) { return x && x.nextSlot; });
+    if (rotRows.length) {
+      out.push(L("定向装备下一轮:" + rotRows.map(function (x) {
+        return (rotNames[x.bossKey] || x.bossKey || "首领") + " → " + PGL.slot(x.nextSlot);
+      }).join("、"), "muted"));
+    }
 
     // 世界首领是协作语义,没有胜负也没有难度。一个首领每场次可协作多次(实测 3 次),
     // 所以按首领归并成一行 —— 七个首领平铺二十多行是噪音,合起来才看得出"这个打满了没有"。

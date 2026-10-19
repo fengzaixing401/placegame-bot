@@ -241,8 +241,35 @@ check("boss 用游戏自己的 summary,不碰收件箱 notices", () => {
   assert.doesNotMatch(t, /"hp"/);
 });
 
-check("每日上限归到提示,不算失败", () => {
-  for (const k of ["boss.map", "guild", "activity"]) {
+check("定向装备部位写在每场那一行,并在末尾交代下一轮", () => {
+  // 形状对着 runBosses 的新输出造:attempted 行多一个 targetSlot,
+  // 顶层多一个 slotRotation(只在个人首领、有游标且非 dryRun 时出现)。
+  const t = text({
+    difficulty: "nightmare",
+    personalDifficulty: "nightmare",
+    gate: { minWinChance: 80, requirePredictedWin: true, useTickets: true },
+    freeAttemptsLeft: 3,
+    attempted: [
+      { bossKey: "tne", name: "真夜镇狱官", difficulty: "nightmare", targetSlot: "weapon", dryRun: false, win: true, result: null },
+      { bossKey: "tne", name: "真夜镇狱官", difficulty: "nightmare", targetSlot: "armor", dryRun: false, win: true, result: null },
+      { bossKey: "tne", name: "真夜镇狱官", difficulty: "nightmare", targetSlot: "ring", dryRun: true, forecast: { chance: 98, predictedWin: true } }
+    ],
+    skipped: [],
+    slotRotation: [{ bossKey: "tne", nextSlot: "medal" }],
+    claimed: { claimed: true }
+  }, "boss.personal");
+  // 每场写自己的部位 —— 只在开头写一次就分不出这一场掉的是哪件装备
+  assert.match(t, /真夜镇狱官\(噩梦\) → 武器:胜利/);
+  assert.match(t, /真夜镇狱官\(噩梦\) → 衣服:胜利/);
+  // 预览也带部位,否则看不出轮换效果
+  assert.match(t, /预览 真夜镇狱官\(噩梦\) → 戒指/);
+  // 游标跨轮持续,单看当轮看不出"下一轮从哪接着走",所以要单独交代一句
+  assert.match(t, /定向装备下一轮:真夜镇狱官 → 勋章/);
+  // 部位显示游戏内中文名,不能把裸键漏到日志里
+  assert.doesNotMatch(t, /weapon|armor|medal/);
+});
+
+check("每日上限归到提示,不算失败", () => {  for (const k of ["boss.map", "guild", "activity"]) {
     const t = text(SAMPLES[k], k);
     assert.match(t, /提示\(每日上限之类,不算失败\)/, k);
     assert.doesNotMatch(t, /失败 \d+ 项/, k);

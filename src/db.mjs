@@ -73,6 +73,24 @@ CREATE TABLE IF NOT EXISTS guild_redeem_totals (
   updated_at TEXT NOT NULL,
   PRIMARY KEY (account_id, item_key)
 );
+
+-- 个人首领的「定向装备部位」轮换游标。
+--
+-- 个人首领可以带 targetSlot 指定这一场掉哪个部位的定向装备(challengeOptions.targetSlots,
+-- 实测 10 个:weapon/armor/helmet/necklace/ring/boots/belt/bracelet/talisman/medal)。
+-- 用户要的是「每次获得的装备轮流选择」—— 每次挑战换下一个部位,一天 10 次正好走完一圈,
+-- 第二天接着往下走(不重置),把十个部位都补齐。
+--
+-- 为什么不放进 rules:rules 是用户配置,「存为规则」会把它整块快照下来;
+-- 轮换游标是运行状态,混进去会让面板出现一个用户看不懂也不该手改的字段。
+-- 为什么不从 job_runs 反推:任务记录会被清理(只留最近若干条),反推会错乱。
+CREATE TABLE IF NOT EXISTS boss_slot_cursor (
+  account_id  TEXT NOT NULL,
+  boss_key    TEXT NOT NULL,
+  next_index  INTEGER NOT NULL DEFAULT 0,  -- 下一场该用 targetSlots 的第几个(取模用)
+  updated_at  TEXT NOT NULL,
+  PRIMARY KEY (account_id, boss_key)
+);
 `;
 
 export function openDb(dbPath) {
