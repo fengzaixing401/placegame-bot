@@ -222,6 +222,10 @@
     var step = e && e.step ? STEP[e.step] || e.step : "";
     var who = (e && (e.name || e.bossKey || e.itemKey || e.equipmentId)) || step || "";
     var msg = (e && e.error) || "未知错误";
+    // 超时要写出这一场等了多久。只写「请求超时」时,根本分不出是网络抖了
+    // 还是超时设得比服务端的结算时间还短 —— 2026-10-21 查 Lv200 世界首领
+    // 就是卡在这一点上:日志里九条一模一样的「请求超时」,看不出 7 秒不够用。
+    if (e && typeof e.timeoutMs === "number" && e.timeoutMs > 0) msg += "(等了 " + (e.timeoutMs / 1000) + " 秒)";
     return who ? who + ":" + msg : String(msg);
   };
 

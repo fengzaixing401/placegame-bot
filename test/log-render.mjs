@@ -526,6 +526,19 @@ check("世界首领时间预算用尽时写出来(不是失败,是没时间)", (
   assert.match(t, /不是失败/);
 });
 
+check("超时要写出等了多久,不然分不清是抖动还是超时设短了", () => {
+  // 2026-10-21 踩过:Lv200 世界首领服务端要 8~9 秒,超时是 7 秒,
+  // 日志里九条一模一样的「请求超时」,完全看不出是超时不够。
+  const t = text(
+    {
+      assisted: [], skipped: [], budgetExhausted: false, notes: [],
+      errors: [{ bossKey: "bloodmoon_annihilator", name: "血月殲灭者", round: 1, error: "请求超时。", timeoutMs: 12000 }]
+    },
+    "boss.world"
+  );
+  assert.match(t, /血月殲灭者:请求超时。\(等了 12 秒\)/);
+});
+
 check("渲染器抛错时说明白,不吞结果", () => {
   const broken = { get mode() { throw new Error("炸了"); } };
   const t = text(broken, "inventory");

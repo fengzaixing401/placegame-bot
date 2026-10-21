@@ -146,6 +146,9 @@ function fakeFetch(url, opts = {}) {
               { key: "ring", name: "戒指" }, { key: "medal", name: "勋章" }] },
             personalAttemptPool: { freeRemaining: freeAttempts, freeLimit: 5, ticketUsed: 0, ticketLimit: 5, nextTicketCost: 0 } },
           { key: "boss_w", type: "world", name: "世界首领", blockedReason: "",
+            // requiredLevel 决定协作超时(见 worldAssistTimeout)。给 200 是为了让
+            // 「高等级首领要等更久」这条在测试里真的走到,而不是永远落在 7 秒下限上。
+            requiredLevel: 200,
             difficultyOptions: diffs("world"),
             assistBlockedReason: worldAssistBlocked,
             worldInstance: { instanceId: "wb_boss_w_fixed_20", bossKey: "boss_w", status: "active",
@@ -1215,6 +1218,42 @@ check(
   wbNoDeadline.assisted.length > 0 && !wbNoDeadline.budgetExhausted,
   JSON.stringify({ assisted: wbNoDeadline.assisted.length })
 );
+
+// ---- 协作超时按首领等级分档 ----
+// 2026-10-21 实测(14 个首领全测,窗口外):服务端结算耗时在 Lv200 有个台阶 ——
+// Lv24~Lv180 全部 1.5~2.3 秒,而 Lv200 的五个直接跳到 6.4~7.8 秒。
+// 统一 7 秒会把 Lv200 那些**每一轮都在服务器返回之前掐断**,
+// 表现成「等级够了却永远不参与」。这不是抖动(反序实测同样慢),靠补跑救不回来。
+check(
+  "Lv200 以下仍用 7 秒下限(实测只要 1.5~2.3 秒,保住快速扫场)",
+  bossFeature.worldAssistTimeout(24) === 7000 &&
+    bossFeature.worldAssistTimeout(180) === 7000,
+  `${bossFeature.worldAssistTimeout(24)} / ${bossFeature.worldAssistTimeout(180)}`
+);
+check(
+  "Lv200 终局档的超时必须长于实测的 7.8 秒",
+  bossFeature.worldAssistTimeout(200) > 7800,
+  String(bossFeature.worldAssistTimeout(200))
+);
+check(
+  "超时不随等级线性膨胀(180 与 24 同档,不做无意义的插值)",
+  bossFeature.worldAssistTimeout(180) === bossFeature.worldAssistTimeout(24) &&
+    bossFeature.worldAssistTimeout(9999) === bossFeature.worldAssistTimeout(200),
+  `${bossFeature.worldAssistTimeout(180)} / ${bossFeature.worldAssistTimeout(9999)}`
+);
+check("读不到等级时退回下限,不猜", bossFeature.worldAssistTimeout(null) === 7000, String(bossFeature.worldAssistTimeout(null)));
+
+// 等级要真的流到超时上 —— 光有映射函数、调用点忘了传,等于没改。
+// 用"协作必失败"的注入造一条错误记录,看它记下的超时值。
+resetAssist({ failOnce: { boss_w: 99 } });
+const wbTimeoutRow = await service.run("fzx401", (api) => bossFeature.runWorldBoss(api, { budgetMs: 3600 * 1000 }));
+const wbErr = (wbTimeoutRow.errors ?? [])[0];
+check(
+  "高等级首领的错误记录里带着它实际用的超时",
+  wbErr?.requiredLevel === 200 && wbErr?.timeoutMs === bossFeature.worldAssistTimeout(200) && wbErr.timeoutMs > 7000,
+  JSON.stringify({ requiredLevel: wbErr?.requiredLevel, timeoutMs: wbErr?.timeoutMs })
+);
+resetAssist();
 
 // ---- 取首领名单失败时的兜底 ----
 // 真号上有一轮 boss.world 整个任务 status=error、result_json 为空,7 个首领一个都没打,

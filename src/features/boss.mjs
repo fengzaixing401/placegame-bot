@@ -734,7 +734,10 @@ async function assistUntilExhausted(api, label, out, { retries = 2, record = tru
     try {
       result = await assist(api, label.bossKey, { retries, timeoutMs });
     } catch (err) {
-      const entry = { ...label, round, error: err.message };
+      // timeoutMs 一起记下来:排查「请求超时」时,第一件事就是看这一场等了多久。
+      // 2026-10-21 踩过 —— Lv200 的首领服务端要 8~9 秒,而超时是 7 秒,
+      // 日志里只有一句「请求超时」,完全看不出是超时设短了,查了两天才定位。
+      const entry = { ...label, round, error: err.message, timeoutMs: timeoutMs ?? null };
       if (record) out.errors.push(entry);
       return entry;
     }
@@ -782,8 +785,28 @@ const WORLD_PREPARE_BUDGET_MS = 2 * 60 * 1000;
 // 等满 15 秒再退避重试 2 次,单个首领最坏 48 秒,21 个首领耗掉 16 分钟以上,
 // 而一轮只有不到 25 分钟(半小时窗口减掉准备与补跑)。
 // 缩短到 7 秒:单次最坏 (7+0.8)+(7+2)+7 ≈ 24 秒,同样时间能多试近一倍的首领。
-// 正常时 assist 只要 2-5 秒(实测),7 秒对健康请求毫无影响。
+//
+// ⚠️ **但 7 秒不能一刀切**:服务端的结算耗时在 Lv200 有一个台阶 ——
+// 实测 Lv24~Lv180 全部只要 1.5~2.3 秒,而 Lv200 的五个(血月殲灭者 / 真夜天灾 /
+// 极夜天灾 / 弑神天灾 / 主宰天灾)直接跳到 6.4~7.8 秒。
+// 统一 7 秒会把它们**每一轮都在服务器返回之前掐断**,表现为
+// 「等级够了却永远不参与」——不是没尝试,是尝试了但每次都超时,
+// 而且日志里只有一句「请求超时」,看不出是超时设短了。
+// 所以按档位给(见 worldAssistTimeout),低等级的快速扫场不受影响。
 const WORLD_ASSIST_TIMEOUT_MS = 7000;
+// 终局档(Lv200 起)给实测的两倍,留够窗口拥挤时的余量。
+const WORLD_ASSIST_ENDGAME_TIMEOUT_MS = 15000;
+const WORLD_ASSIST_MAX_TIMEOUT_MS = 25000;
+
+// 某个世界首领该等多久。
+// 不做线性插值:实测是台阶不是斜坡(Lv180 只要 2.2 秒,Lv200 要 6.4~7.8 秒),
+// 按等级乘个系数只会把中间档的上限抬起来,对响应快的首领没有任何好处。
+// 读不到等级就用下限 —— 宁可少等,也不要让一个异常值把整轮拖长。
+export function worldAssistTimeout(requiredLevel) {
+  const lv = num(requiredLevel);
+  if (lv === null) return WORLD_ASSIST_TIMEOUT_MS;
+  return lv >= 200 ? WORLD_ASSIST_ENDGAME_TIMEOUT_MS : WORLD_ASSIST_TIMEOUT_MS;
+}
 
 // 整轮还剩多少时间可用。budgetMs 是**本轮可用的总时长**(排程按窗口剩余算出来的),
 // startedAt 是本轮起始时刻。不传 budgetMs = 不设预算,返回 Infinity(行为与从前一致)。
@@ -819,7 +842,8 @@ export async function runWorldBoss(api, { rules = {}, budgetMs = null } = {}) {
     if (wanted.size > 0 && !wanted.has(key) && !wanted.has(boss.name)) continue;
 
     // name 供页面显示中文名(否则日志里只剩 bossKey 裸键)
-    const label = { bossKey: key, name: boss.name };
+    // requiredLevel 一起带上:补跑那一轮要按等级重新算超时,而那里只剩 label。
+    const label = { bossKey: key, name: boss.name, requiredLevel: num(boss.requiredLevel) };
     const reason = assistBlockedReason(boss);
     if (reason) {
       out.skipped.push({ ...label, reason, refreshText: boss.refreshText ?? null });
@@ -832,7 +856,7 @@ export async function runWorldBoss(api, { rules = {}, budgetMs = null } = {}) {
       notRun.push({ bossKey: key, name: boss.name });
       continue;
     }
-    const err = await assistUntilExhausted(api, label, out, { timeoutMs: WORLD_ASSIST_TIMEOUT_MS });
+    const err = await assistUntilExhausted(api, label, out, { timeoutMs: worldAssistTimeout(label.requiredLevel) });
     if (err) failed.push({ label, err });
   }
   if (notRun.length > 0) {
@@ -845,7 +869,10 @@ export async function runWorldBoss(api, { rules = {}, budgetMs = null } = {}) {
   // 为什么值得补:实测 2026-09-22 游戏把世界首领从 8 个加到 14 个之后,每轮稳定出现
   // 约 4 条「请求超时」(加之前是 0 条),而**同一个首领在别的窗口常常协作成功** ——
   // 说明是瞬时抖动,不是这个首领打不了。当轮直接放弃等于白丢一次协作。
-  // (单次 assist 实测只要 2-5 秒,远没到 15 秒超时,所以不是超时设短了。)
+  //
+  // 补跑的超时再放大 1.6 倍(封顶 25 秒):主循环是"快速扫场",这一轮是"给慢的那些兜底"。
+  // Lv200 实测 6.4~7.8 秒,主循环 15 秒已经够;但 10:00 场服务端过载时会更慢,
+  // 这里留出余量,免得又变成"超时设短了"。
   //
   // 只补一轮、且每次只重试 1 次(主循环已经是 3 次尝试),免得一直抖一直重试把整轮拖长。
   // 补成功后把先前那条错误记录**撤回** —— 它已经不是最终结果,留着会把日志带偏,
@@ -854,7 +881,11 @@ export async function runWorldBoss(api, { rules = {}, budgetMs = null } = {}) {
   for (const f of failed) {
     // 补跑同样吃预算 —— 时间不够时宁可留着那条错误记录,也不要卡在半路
     if (left() <= 0) break;
-    const again = await assistUntilExhausted(api, f.label, out, { retries: 1, record: false, timeoutMs: WORLD_ASSIST_TIMEOUT_MS });
+    const retryTimeout = Math.min(
+      WORLD_ASSIST_MAX_TIMEOUT_MS,
+      Math.round(worldAssistTimeout(f.label.requiredLevel) * 1.6)
+    );
+    const again = await assistUntilExhausted(api, f.label, out, { retries: 1, record: false, timeoutMs: retryTimeout });
     if (!again) recovered.add(f.err);
   }
   if (recovered.size > 0) out.errors = out.errors.filter((e) => !recovered.has(e));
