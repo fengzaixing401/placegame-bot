@@ -1110,6 +1110,13 @@ check(
     wbOpen.assisted[0].round === 1,
   JSON.stringify(wbOpen.assisted[0])
 );
+// 每场都要记真实耗时。超时该设多少只能靠这个数 —— 窗口外打一次测到的是"拒绝路径",
+// 和真实结算差着一个量级,拿它当依据就会把超时设短(2026-10-29~30 就是这么连废多轮的)。
+check(
+  "每场协作都记下真实耗时",
+  wbOpen.assisted.every((a) => typeof a.durationMs === "number" && a.durationMs >= 0),
+  JSON.stringify(wbOpen.assisted.map((a) => a.durationMs))
+);
 check("世界首领不主动挑战也不调 preview", !wbOpenPaths.includes("/api/boss/challenge") && !wbOpenPaths.includes("/api/boss/preview"), JSON.stringify(wbOpenPaths));
 check("协作成功后领奖", wbOpen.claimed?.claimed === true, JSON.stringify(wbOpen.claimed));
 check("场次信息照原样带出供页面显示", Array.isArray(wbOpen.status) && wbOpen.status[0]?.status === "active", JSON.stringify(wbOpen.status));
@@ -1220,19 +1227,21 @@ check(
 );
 
 // ---- 协作超时按首领等级分档 ----
-// 2026-10-21 实测(14 个首领全测,窗口外):服务端结算耗时在 Lv200 有个台阶 ——
-// Lv24~Lv180 全部 1.5~2.3 秒,而 Lv200 的五个直接跳到 6.4~7.8 秒。
-// 统一 7 秒会把 Lv200 那些**每一轮都在服务器返回之前掐断**,
-// 表现成「等级够了却永远不参与」。这不是抖动(反序实测同样慢),靠补跑救不回来。
+// 2026-10-21 实测(14 个首领全测,窗口外):服务端耗时在 Lv200 有个台阶 ——
+// Lv24~Lv180 全部 1.5~2.3 秒,而 Lv200 的五个直接跳到 6.4~9.6 秒。
+// 但 2026-10-29~30 的真实窗口里,11 个首领**全部**在 7 秒被掐断(连续多轮 0 次协作),
+// 而每轮只用了 7 分钟、窗口有 60 分钟 —— 说明窗口外测的是"拒绝路径",
+// 真实结算要久得多,预算从来不是瓶颈。所以两档都放宽:30 秒 / 45 秒。
 check(
-  "Lv200 以下仍用 7 秒下限(实测只要 1.5~2.3 秒,保住快速扫场)",
-  bossFeature.worldAssistTimeout(24) === 7000 &&
-    bossFeature.worldAssistTimeout(180) === 7000,
+  "普通档超时放宽到 30 秒(窗口外实测 1.5~2.3 秒只是拒绝路径,不能当依据)",
+  bossFeature.worldAssistTimeout(24) === 30000 &&
+    bossFeature.worldAssistTimeout(180) === 30000,
   `${bossFeature.worldAssistTimeout(24)} / ${bossFeature.worldAssistTimeout(180)}`
 );
 check(
-  "Lv200 终局档的超时必须长于实测的 7.8 秒",
-  bossFeature.worldAssistTimeout(200) > 7800,
+  "Lv200 终局档更长(窗口外实测就比低等级慢 3~5 倍)",
+  bossFeature.worldAssistTimeout(200) > bossFeature.worldAssistTimeout(180) &&
+    bossFeature.worldAssistTimeout(200) >= 45000,
   String(bossFeature.worldAssistTimeout(200))
 );
 check(
@@ -1241,7 +1250,7 @@ check(
     bossFeature.worldAssistTimeout(9999) === bossFeature.worldAssistTimeout(200),
   `${bossFeature.worldAssistTimeout(180)} / ${bossFeature.worldAssistTimeout(9999)}`
 );
-check("读不到等级时退回下限,不猜", bossFeature.worldAssistTimeout(null) === 7000, String(bossFeature.worldAssistTimeout(null)));
+check("读不到等级时退回普通档,不猜", bossFeature.worldAssistTimeout(null) === 30000, String(bossFeature.worldAssistTimeout(null)));
 
 // 等级要真的流到超时上 —— 光有映射函数、调用点忘了传,等于没改。
 // 用"协作必失败"的注入造一条错误记录,看它记下的超时值。

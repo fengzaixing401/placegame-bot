@@ -731,13 +731,20 @@ async function assistUntilExhausted(api, label, out, { retries = 2, record = tru
   let lastLeft = null;
   for (let round = 1; ; round += 1) {
     let result;
+    const t0 = Date.now();
     try {
       result = await assist(api, label.bossKey, { retries, timeoutMs });
     } catch (err) {
       // timeoutMs 一起记下来:排查「请求超时」时,第一件事就是看这一场等了多久。
       // 2026-10-21 踩过 —— Lv200 的首领服务端要 8~9 秒,而超时是 7 秒,
       // 日志里只有一句「请求超时」,完全看不出是超时设短了,查了两天才定位。
-      const entry = { ...label, round, error: err.message, timeoutMs: timeoutMs ?? null };
+      const entry = {
+        ...label,
+        round,
+        error: err.message,
+        timeoutMs: timeoutMs ?? null,
+        durationMs: Date.now() - t0
+      };
       if (record) out.errors.push(entry);
       return entry;
     }
@@ -750,6 +757,9 @@ async function assistUntilExhausted(api, label, out, { retries = 2, record = tru
     out.assisted.push({
       ...label,
       round,
+      // 成功那一场的真实耗时。有它才能知道超时该设多少 —— 之前全靠"窗口外
+      // 打一次看几秒",而窗口外走的是拒绝路径(2~9 秒),和真实结算不是一回事。
+      durationMs: Date.now() - t0,
       damage: num(result?.damage),
       myDamagePercent: num(inst?.myDamagePercent),
       myAttemptCount: num(inst?.myAttemptCount),
@@ -779,27 +789,29 @@ async function assistUntilExhausted(api, label, out, { retries = 2, record = tru
 // budgetMs 由排程按"窗口还剩多少分钟"算好传入;直接调用(如测试)不传 = 不设预算。
 // 留最后一段给补跑与领奖 —— 否则主循环正好把时间用光,补跑一步都轮不到,
 // 而补跑恰恰是 10:00 场唯一能把漏掉的协作捡回来的机会。
-const WORLD_PREPARE_BUDGET_MS = 2 * 60 * 1000;
+// 超时放宽到 30/45 秒之后,补跑一轮最坏要几分钟,所以留 5 分钟(原 2 分钟不够)。
+const WORLD_PREPARE_BUDGET_MS = 5 * 60 * 1000;
 
-// 世界首领协作的超时(毫秒)。客户端默认 15 秒 —— 在 10:00 场服务端过载时,
-// 等满 15 秒再退避重试 2 次,单个首领最坏 48 秒,21 个首领耗掉 16 分钟以上,
-// 而一轮只有不到 25 分钟(半小时窗口减掉准备与补跑)。
-// 缩短到 7 秒:单次最坏 (7+0.8)+(7+2)+7 ≈ 24 秒,同样时间能多试近一倍的首领。
+// 世界首领协作的超时(毫秒)。
 //
-// ⚠️ **但 7 秒不能一刀切**:服务端的结算耗时在 Lv200 有一个台阶 ——
-// 实测 Lv24~Lv180 全部只要 1.5~2.3 秒,而 Lv200 的五个(血月殲灭者 / 真夜天灾 /
-// 极夜天灾 / 弑神天灾 / 主宰天灾)直接跳到 6.4~7.8 秒。
-// 统一 7 秒会把它们**每一轮都在服务器返回之前掐断**,表现为
-// 「等级够了却永远不参与」——不是没尝试,是尝试了但每次都超时,
-// 而且日志里只有一句「请求超时」,看不出是超时设短了。
-// 所以按档位给(见 worldAssistTimeout),低等级的快速扫场不受影响。
-const WORLD_ASSIST_TIMEOUT_MS = 7000;
-// 终局档(Lv200 起)给实测的两倍,留够窗口拥挤时的余量。
-const WORLD_ASSIST_ENDGAME_TIMEOUT_MS = 15000;
-const WORLD_ASSIST_MAX_TIMEOUT_MS = 25000;
+// 这段值改过三次,每次都是因为"超时比服务端还短",表现成首领永远不参与:
+//   ① 客户端默认 15 秒 —— 10:00 场过载时单个首领最坏 48 秒,21 个跑不完窗口。
+//   ② 收到 7 秒 —— 解决了跑不完,但把慢的掐死了。
+//   ③ 现在按档位给 30 / 45 秒 —— 2026-10-29~30 实测:11 个首领**全部**在 7 秒
+//      被掐断,连续多轮 0 次协作,而每轮只用了 7 分钟、窗口有 60 分钟。
+//      预算根本不是瓶颈,超时才是。
+//
+// ⚠️ 窗口外打一次只能测到"拒绝路径"的耗时(实测 1.5~9.6 秒),真实结算要更久 ——
+// 不能拿那个数当依据。所以现在每场都把 durationMs 记进结果,下一轮就能按真实
+// 成功耗时校准,而不是继续猜。
+//
+// Lv200 那一档单独放宽:窗口外实测它比低等级慢 3~5 倍(6.4~9.6 秒 vs 1.5~2.3 秒)。
+const WORLD_ASSIST_TIMEOUT_MS = 30000;
+const WORLD_ASSIST_ENDGAME_TIMEOUT_MS = 45000;
+const WORLD_ASSIST_MAX_TIMEOUT_MS = 60000;
 
 // 某个世界首领该等多久。
-// 不做线性插值:实测是台阶不是斜坡(Lv180 只要 2.2 秒,Lv200 要 6.4~7.8 秒),
+// 不做线性插值:实测是台阶不是斜坡(Lv180 只要 2.2 秒,Lv200 要 6.4~9.6 秒),
 // 按等级乘个系数只会把中间档的上限抬起来,对响应快的首领没有任何好处。
 // 读不到等级就用下限 —— 宁可少等,也不要让一个异常值把整轮拖长。
 export function worldAssistTimeout(requiredLevel) {
@@ -870,9 +882,9 @@ export async function runWorldBoss(api, { rules = {}, budgetMs = null } = {}) {
   // 约 4 条「请求超时」(加之前是 0 条),而**同一个首领在别的窗口常常协作成功** ——
   // 说明是瞬时抖动,不是这个首领打不了。当轮直接放弃等于白丢一次协作。
   //
-  // 补跑的超时再放大 1.6 倍(封顶 25 秒):主循环是"快速扫场",这一轮是"给慢的那些兜底"。
-  // Lv200 实测 6.4~7.8 秒,主循环 15 秒已经够;但 10:00 场服务端过载时会更慢,
-  // 这里留出余量,免得又变成"超时设短了"。
+  // 补跑的超时再放大 1.6 倍(封顶 60 秒):主循环是"快速扫场",这一轮是"给慢的那些兜底"。
+  // 2026-10-29~30 那批失败里,11 个首领全在 7 秒被掐断,而整轮只用了 7 分钟 ——
+  // 说明"快"根本不是目的,打上才是。所以这一轮宁可慢。
   //
   // 只补一轮、且每次只重试 1 次(主循环已经是 3 次尝试),免得一直抖一直重试把整轮拖长。
   // 补成功后把先前那条错误记录**撤回** —— 它已经不是最终结果,留着会把日志带偏,
